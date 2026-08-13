@@ -41,7 +41,8 @@ def get_response(chunks, user_prompt):
         chunk = chunk.properties
         chunk_title = chunk["folder_path"] if chunk["folder_path"] else "unknown"
 
-        chunk_full_text = chunk["full_text"] if chunk["full_text"] else "no text"
+        # chunk_full_text = chunk["full_text"] if chunk["full_text"] else "no text"
+        chunk_full_text = chunk["text"] if chunk["text"] else "no text"
 
         chunk_info = chunk_title + " Full text: " + chunk_full_text
         inference_prompt += " " + chunk_info + " "
@@ -93,6 +94,6 @@ if st.button("Generate post!"):
         st.header("Sources")
 
         for chunk in chunks:
-            st.write(f"URI: {chunk.properties['uri']}")
+            # st.write(f"URI: {chunk.properties['uri']}")
             st.write(f"Chunk number: {int(chunk.properties['chunk_index'])}")
             st.write("---")
