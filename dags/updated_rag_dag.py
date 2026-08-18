@@ -5,10 +5,9 @@ This DAG ingests text data from markdown files, chunks the text, and then ingest
 the chunks into a Weaviate vector database.
 """
 
-from airflow.decorators import dag, task
-from airflow.models.baseoperator import chain
-from airflow.operators.python import get_current_context
-from airflow.operators.empty import EmptyOperator
+from airflow.sdk import dag, task, get_current_context
+from airflow.sdk.bases.operator import chain
+from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 from airflow.providers.weaviate.operators.weaviate import WeaviateIngestOperator
 from pendulum import datetime, duration
@@ -29,7 +28,6 @@ _INGESTION_FOLDERS_LOCAL_PATHS = os.getenv("INGESTION_FOLDERS_LOCAL_PATHS")
 
 _WEAVIATE_CONN_ID = os.getenv("WEAVIATE_CONN_ID")
 _WEAVIATE_CLASS_NAME = os.getenv("WEAVIATE_CLASS_NAME")
-_WEAVIATE_VECTORIZER = os.getenv("WEAVIATE_VECTORIZER")
 _WEAVIATE_SCHEMA_PATH = os.getenv("WEAVIATE_SCHEMA_PATH")
 
 _CREATE_COLLECTION_TASK_ID = "create_collection"
