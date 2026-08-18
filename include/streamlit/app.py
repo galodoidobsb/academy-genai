@@ -56,7 +56,7 @@ def get_response(chunks, user_prompt):
 
     client = OpenAI()
 
-    champion_model_id = "gpt-4"
+    champion_model_id = "gpt-5.6-terra"
 
     chat_completion = client.chat.completions.create(
         model=champion_model_id,
@@ -95,5 +95,6 @@ if st.button("Generate post!"):
 
         for chunk in chunks:
             # st.write(f"URI: {chunk.properties['uri']}")
-            st.write(f"Chunk number: {int(chunk.properties['chunk_index'])}")
+            # st.write(f"Chunk number: {int(chunk.properties['chunk_index'])}")
+            st.write(f"Chunk title: {chunk.properties['title']}")
             st.write("---")
