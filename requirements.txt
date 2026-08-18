@@ -2,5 +2,7 @@
 apache-airflow-providers-weaviate
 weaviate-client==4.23
 langchain
+langchain-text-splitters
+langchain-core
 apache-airflow-providers-common-ai[llamaindex]
 pyarrow
