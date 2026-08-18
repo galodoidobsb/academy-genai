@@ -144,62 +144,64 @@ def updated_rag_dag():
         collection_exists_instance
     ] >> weaviate_ready_instance
 
-    # @task(
-    #     map_index_template="{{ my_custom_map_index }}"
-    # )
-    # def extract_document_text(ingestion_folder_local_path):
-    #     """
-    #     Extract information from markdown files in a folder.
-    #     Args:
-    #         folder_path (str): Path to the folder containing markdown files.
-    #     Returns:
-    #         pd.DataFrame: A list of dictionaries containing the extracted information.
-    #     """
+    @task(
+        map_index_template="{{ my_custom_map_index }}"
+    )
+    def extract_document_text(ingestion_folder_local_path):
+        """
+        Extract information from markdown files in a folder.
+        Args:
+            folder_path (str): Path to the folder containing markdown files.
+        Returns:
+            pd.DataFrame: A list of dictionaries containing the extracted information.
+        """
 
-    #     # NOTE: We need the get_current_context method here to MODIFY the current context,
-    #     # passing he map index value at runtime
-    #     # When using def task_method(arg, **context), we can only access it, but we
-    #     # can't update the "root" dictionary object
-    #     context = get_current_context()
-    #     context["my_custom_map_index"] = ingestion_folder_local_path
+        # NOTE: We need the get_current_context method here to MODIFY the current context,
+        # passing he map index value at runtime
+        # When using def task_method(arg, **context), we can only access it, but we
+        # can't update the "root" dictionary object
+        context = get_current_context()
+        context["my_custom_map_index"] = ingestion_folder_local_path
 
-    #     files = [
-    #         f for f in os.listdir(ingestion_folder_local_path) if f.endswith(".md")
-    #     ]
+        files = [
+            f for f in os.listdir(ingestion_folder_local_path) if f.endswith(".md")
+        ]
 
-    #     titles = []
-    #     texts = []
+        titles = []
+        texts = []
 
-    #     for file in files:
-    #         # file_path = os.path.join(ingestion_folder_local_path, file)
-    #         file_path = Path(ingestion_folder_local_path) / Path(file)
+        for file in files:
+            # file_path = os.path.join(ingestion_folder_local_path, file)
+            file_path = Path(ingestion_folder_local_path) / Path(file)
             
-    #         titles.append(file_path.stem)
-    #         # titles.append(file.split(".")[0])
+            titles.append(file_path.stem)
+            # titles.append(file.split(".")[0])
 
-    #         with open(file_path, "r", encoding="utf-8") as f:
-    #             texts.append(f.read())
+            with open(file_path, "r", encoding="utf-8") as f:
+                texts.append(f.read())
 
-    #     document_df = pd.DataFrame(
-    #         {
-    #             "folder_path": ingestion_folder_local_path,
-    #             "title": titles,
-    #             "text": texts,
-    #         }
-    #     )
-    #     # NOTE: Inserting the caption metadata is not working
-    #     document_df.style.set_caption(f"DataFrame for {ingestion_folder_local_path} folder files")
+        document_df = pd.DataFrame(
+            {
+                "folder_path": ingestion_folder_local_path,
+                "title": titles,
+                "text": texts,
+            }
+        )
+        # NOTE: Inserting the caption metadata is not working
+        document_df.style.set_caption(f"DataFrame for {ingestion_folder_local_path} folder files")
 
-    #     t_log.info(f"DataFrame general structure: {document_df.info()}")
-    #     t_log.info(f"DataFrame main stats: {document_df.describe()}")
-    #     t_log.info(f"DataFrame first rows: {document_df.head()}")
+        t_log.info(f"DataFrame general structure: {document_df.info()}")
+        t_log.info(f"DataFrame main stats: {document_df.describe()}")
+        t_log.info(f"DataFrame first rows: {document_df.head()}")
 
-    #     return document_df
+        return document_df
 
-    # # NOTE: Expand expects kwargs, if we just pass the pargument value, it doesnt work
-    # extract_document_text_obj = extract_document_text.expand(
-    #     ingestion_folder_local_path=fetch_ingestion_folders_local_paths_obj
-    # )
+    # NOTE: Expand expects kwargs, if we just pass the pargument value, it doesnt work
+    extract_document_text_instance = extract_document_text.expand(
+        ingestion_folder_local_path=fetch_ingestion_folders_local_paths_instance
+    )
+
+    fetch_ingestion_folders_local_paths_instance >> extract_document_text_instance
 
     # @task(
     #     map_index_template="{{ my_custom_map_index }}"
