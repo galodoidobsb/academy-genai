@@ -6,6 +6,7 @@ the chunks into a Weaviate vector database.
 """
 
 from airflow.decorators import dag, task
+from airflow.models.baseoperator import chain
 from airflow.operators.python import get_current_context
 from airflow.operators.empty import EmptyOperator
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
@@ -134,16 +135,6 @@ def updated_rag_dag():
 
     fetch_ingestion_folders_local_paths_instance = fetch_ingestion_folders_local_paths(_INGESTION_FOLDERS_LOCAL_PATHS)
 
-    check_collection_instance >> [
-        create_collection(
-            conn_id=_WEAVIATE_CONN_ID,
-            collection_name=_WEAVIATE_CLASS_NAME,
-            vectorizer=VECTORIZER,
-            schema_json_path=_WEAVIATE_SCHEMA_PATH,
-        ),
-        collection_exists_instance
-    ] >> weaviate_ready_instance
-
     @task(
         map_index_template="{{ my_custom_map_index }}"
     )
@@ -197,71 +188,78 @@ def updated_rag_dag():
         return document_df
 
     # NOTE: Expand expects kwargs, if we just pass the pargument value, it doesnt work
-    extract_document_text_instance = extract_document_text.expand(
+    extract_document_text_instance_list = extract_document_text.expand(
         ingestion_folder_local_path=fetch_ingestion_folders_local_paths_instance
     )
 
-    fetch_ingestion_folders_local_paths_instance >> extract_document_text_instance
+    @task(
+        map_index_template="{{ my_custom_map_index }}"
+    )
+    def chunk_text(df):
+        """
+        Chunk the text in the DataFrame.
+        Args:
+            df (pd.DataFrame): The DataFrame containing the text to chunk.
+        Returns:
+            pd.DataFrame: The DataFrame with the text chunked.
+        """
 
-    # @task(
-    #     map_index_template="{{ my_custom_map_index }}"
-    # )
-    # def chunk_text(df):
-    #     """
-    #     Chunk the text in the DataFrame.
-    #     Args:
-    #         df (pd.DataFrame): The DataFrame containing the text to chunk.
-    #     Returns:
-    #         pd.DataFrame: The DataFrame with the text chunked.
-    #     """
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        from langchain_core.documents import Document
 
-    #     from langchain.text_splitter import RecursiveCharacterTextSplitter
-    #     from langchain.schema import Document
+        context = get_current_context()
+        # context["my_custom_map_index"] = df.style.caption
+        context["my_custom_map_index"] = f"Chunked files from a df of length: {len(df)}."
 
-    #     context = get_current_context()
-    #     # context["my_custom_map_index"] = df.style.caption
-    #     context["my_custom_map_index"] = f"Chunked files from a df of length: {len(df)}."
+        splitter = RecursiveCharacterTextSplitter()
 
-    #     splitter = RecursiveCharacterTextSplitter()
+        df["chunks"] = df["text"].apply(
+            lambda x: splitter.split_documents([Document(page_content=x)])
+        )
+        # df.head()
 
-    #     df["chunks"] = df["text"].apply(
-    #         lambda x: splitter.split_documents([Document(page_content=x)])
-    #     )
-    #     # df.head()
+        df = df.explode("chunks", ignore_index=True)
+        df.dropna(subset=["chunks"], inplace=True)
+        # df.head()
+        # for chunk_object in df["chunks"]:
+        #     print(chunk_object)
+        #     print(chunk_object.__dict__)
 
-    #     df = df.explode("chunks", ignore_index=True)
-    #     df.dropna(subset=["chunks"], inplace=True)
-    #     # df.head()
-    #     # for chunk_object in df["chunks"]:
-    #     #     print(chunk_object)
-    #     #     print(chunk_object.__dict__)
+        df["text"] = df["chunks"].apply(lambda x: x.page_content)
+        df.drop(["chunks"], inplace=True, axis=1)
+        df.reset_index(inplace=True, drop=True)
 
-    #     df["text"] = df["chunks"].apply(lambda x: x.page_content)
-    #     df.drop(["chunks"], inplace=True, axis=1)
-    #     df.reset_index(inplace=True, drop=True)
+        t_log.info(f"Chunks DataFrame general structure: {df.info()}")
+        t_log.info(f"Chunks DataFrame main stats: {df.describe()}")
+        t_log.info(f"Chunks DataFrame first rows: {df.head()}")
 
-    #     t_log.info(f"Chunks DataFrame general structure: {df.info()}")
-    #     t_log.info(f"Chunks DataFrame main stats: {df.describe()}")
-    #     t_log.info(f"Chunks DataFrame first rows: {df.head()}")
+        return df
 
-    #     return df
+    chunk_text_instance_list = chunk_text.expand(df=extract_document_text_instance_list)
 
-    # chunk_text_obj = chunk_text.expand(df=extract_document_text_obj)
+    ingest_data_instance_list = WeaviateIngestOperator.partial(
+        task_id="ingest_data",
+        conn_id="weaviate_default",
+        collection_name=_WEAVIATE_CLASS_NAME,
+        # NOTE: Use jinja templating to pass custom map index as well
+        map_index_template="Ingested files from: {{ task.input_data.to_dict()['folder_path'][0] }}.",
+    ).expand(input_data=chunk_text_instance_list)
 
-    # ingest_data = WeaviateIngestOperator.partial(
-    #     task_id="ingest_data",
-    #     conn_id="weaviate_default",
-    #     class_name=_WEAVIATE_CLASS_NAME,
-    #     # NOTE: Use jinja templating to pass custom map index as well
-    #     map_index_template="Ingested files from: {{ task.input_data.to_dict()['folder_path'][0] }}.",
-    # ).expand(input_data=chunk_text_obj)
 
-    # check_class_obj >> [create_class_obj, class_already_exists] >> weaviate_ready
-    # fetch_ingestion_folders_local_paths_obj >> extract_document_text_obj >> chunk_text_obj
-    # # [weaviate_ready, chunk_text_obj] >> ingest_data
-    # chain(
-    #     [chunk_text_obj, weaviate_ready],
-    #     ingest_data,
-    # )
+    check_collection_instance >> [
+        create_collection(
+            conn_id=_WEAVIATE_CONN_ID,
+            collection_name=_WEAVIATE_CLASS_NAME,
+            vectorizer=VECTORIZER,
+            schema_json_path=_WEAVIATE_SCHEMA_PATH,
+        ),
+        collection_exists_instance
+    ] >> weaviate_ready_instance
+
+    fetch_ingestion_folders_local_paths_instance >> extract_document_text_instance_list >> chunk_text_instance_list
+    chain(
+        [chunk_text_instance_list, weaviate_ready_instance],
+        ingest_data_instance_list,
+    )
 
 updated_rag_dag()
