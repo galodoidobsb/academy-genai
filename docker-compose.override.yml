@@ -4,10 +4,10 @@ services:
     networks:
     - airflow
   weaviate:
-    image: cr.weaviate.io/semitechnologies/weaviate:1.23.7
+    image: cr.weaviate.io/semitechnologies/weaviate:1.38.0
     command: "--host 0.0.0.0 --port '8081' --scheme http"
     ports:
-    - 8081:8081
+    - "8081:8081"
     - "50051:50051"
     volumes:
     - ${PWD}/include/weaviate/backup:/var/lib/weaviate/backup
@@ -18,13 +18,22 @@ services:
       AUTHENTICATION_APIKEY_USERS: 'jane@doe.com,john@doe.com'
       PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
       DEFAULT_VECTORIZER_MODULE: 'text2vec-openai'
-      ENABLE_MODULES: 'text2vec-openai, backup-filesystem, qna-openai, text2vec'
+      ENABLE_MODULES: 'text2vec-openai, backup-filesystem, qna-openai, text2vec-transformers'
       BACKUP_FILESYSTEM_PATH: '/var/lib/weaviate/backup'
       CLUSTER_HOSTNAME: 'node1'
+      TRANSFORMERS_INFERENCE_API: 'http://t2v-transformers:8080'
     networks:
     - airflow
+  t2v-transformers:
+    image: semitechnologies/transformers-inference:sentence-transformers-multi-qa-MiniLM-L6-cos-v1
+    environment:
+      ENABLE_CUDA: 0 # set to 1 to enable
+    ports:
+      - 8082:8080
+    networks:
+      - airflow
   streamlit:
-    image: python:3.11
+    image: python:3.13
     command: bash -c "pip install -r /app/include/requirements.txt && streamlit run --server.enableWebsocketCompression=false --server.enableCORS=false --server.enableXsrfProtection=false /app/include/app.py"
     ports:
       - "8501:8501"

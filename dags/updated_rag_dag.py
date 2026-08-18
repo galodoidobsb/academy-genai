@@ -5,17 +5,20 @@ This DAG ingests text data from markdown files, chunks the text, and then ingest
 the chunks into a Weaviate vector database.
 """
 
-from airflow.decorators import dag, task
-from airflow.operators.python import get_current_context
-from airflow.models.baseoperator import chain
-from airflow.operators.empty import EmptyOperator
+from airflow.sdk import dag, task, get_current_context
+from airflow.sdk.bases.operator import chain
+from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 from airflow.providers.weaviate.operators.weaviate import WeaviateIngestOperator
 from pendulum import datetime, duration
 from pathlib import Path
 import os
+import re
 import logging
 import pandas as pd
+import weaviate.classes.config as wvcc
+from weaviate.util import generate_uuid5
+
 
 # Set logging
 t_log = logging.getLogger("airflow.task")
@@ -25,11 +28,14 @@ _INGESTION_FOLDERS_LOCAL_PATHS = os.getenv("INGESTION_FOLDERS_LOCAL_PATHS")
 
 _WEAVIATE_CONN_ID = os.getenv("WEAVIATE_CONN_ID")
 _WEAVIATE_CLASS_NAME = os.getenv("WEAVIATE_CLASS_NAME")
-_WEAVIATE_VECTORIZER = os.getenv("WEAVIATE_VECTORIZER")
 _WEAVIATE_SCHEMA_PATH = os.getenv("WEAVIATE_SCHEMA_PATH")
 
-_CREATE_CLASS_TASK_ID = "create_class"
-_CLASS_ALREADY_EXISTS_TASK_ID = "class_already_exists"
+_CREATE_COLLECTION_TASK_ID = "create_collection"
+_COLLECTION_ALREADY_EXISTS_TASK_ID = "collection_already_exists"
+
+VECTORIZER = wvcc.Configure.Vectorizer.text2vec_transformers()
+# VECTORIZER = wvcc.Configure.Vectorizer.text2vec_openai(model="ada")
+
 
 @dag(
     dag_display_name="📚 Ingest Knowledge Base",
@@ -46,22 +52,20 @@ _CLASS_ALREADY_EXISTS_TASK_ID = "class_already_exists"
     doc_md=__doc__,
     description="Ingest knowledge into the vector database for RAG.",
 )
-def my_first_rag_dag():
+def updated_rag_dag():
 
     @task.branch
-    def check_class(
+    def check_collection(
         conn_id: str,
-        class_name: str,
-        create_class_task_id: str,
-        class_already_exists_task_id: str,
+        collection_name: str,
     ) -> str:
         """
-        Check if the target class exists in the Weaviate schema.
+        Check if the target collection (formerly known as class) exists in the Weaviate schema.
         Args:
             conn_id: The connection ID to use.
-            class_name: The name of the class to check.
-            create_class_task_id: The task ID to execute if the class does not exist.
-            class_already_exists_task_id: The task ID to execute if the class already exists.
+            collection_name: The name of the collection to check.
+            create_collection_task_id: The task ID to execute if the collection does not exist.
+            collection_already_exists_task_id: The task ID to execute if the collection already exists.
         Returns:
             str: Task ID of the next task to execute.
         """
@@ -69,43 +73,34 @@ def my_first_rag_dag():
         # connect to Weaviate using the Airflow connection `conn_id`
         hook = WeaviateHook(conn_id)
 
-        # retrieve the existing schema from the Weaviate instance
-        schema = hook.get_schema()
-        existing_classes = {
-            cls["class"]: cls for cls in schema.get("classes", [])
-        }
+        # check if the collection exists in the Weaviate database
+        collection = hook.get_conn().collections.exists(collection_name)
 
-        # if the target class does not exist yet, we will need to create it
-        if class_name not in existing_classes:
-            t_log.info(f"Class {class_name} does not exist yet.")
-            # return "The class does not exist yet"
-            return create_class_task_id
-        # if the target class exists it does not need to be created
+        if collection:
+            t_log.info(f"Collection {collection_name} already exists.")
+            return _COLLECTION_ALREADY_EXISTS_TASK_ID
         else:
-            t_log.info(f"Class {class_name} already exists.")
-            # return "The class already exists"
-            return class_already_exists_task_id
+            t_log.info(f"collection {collection_name} does not exist yet.")
+            return _CREATE_COLLECTION_TASK_ID
 
-    check_class_obj = check_class(
+    check_collection_instance = check_collection(
         conn_id=_WEAVIATE_CONN_ID,
-        class_name=_WEAVIATE_CLASS_NAME,
-        create_class_task_id=_CREATE_CLASS_TASK_ID,
-        class_already_exists_task_id=_CLASS_ALREADY_EXISTS_TASK_ID,
+        collection_name=_WEAVIATE_CLASS_NAME,
     )
 
     @task
-    def create_class(
+    def create_collection(
         conn_id: str,
-        class_name: str,
+        collection_name: str,
         vectorizer: str,
         schema_json_path: str
     ) -> None:
         """
-        Create a class in the Weaviate schema.
+        Create a collection in the Weaviate schema.
         Args:
             conn_id: The connection ID to use.
-            class_name: The name of the class to create.
-            vectorizer: The vectorizer to use for the class.
+            collection_name: The name of the collection to create.
+            vectorizer: The vectorizer to use for the collection.
             schema_json_path: The path to the schema JSON file.
         """
 
@@ -116,25 +111,16 @@ def my_first_rag_dag():
         with open(schema_json_path) as f:
             schema = json.load(f)
             class_obj = next(
-                (item for item in schema["classes"] if item["class"] == class_name),
+                (item for item in schema["classes"] if item["class"] == collection_name),
                 None,
             )
             class_obj["vectorizer"] = vectorizer
 
-        weaviate_hook.create_class(class_obj)        
+        weaviate_hook.create_collection(name=collection_name, vectorizer_config=VECTORIZER)       
 
-    create_class_obj = create_class(
-        conn_id=_WEAVIATE_CONN_ID,
-        class_name=_WEAVIATE_CLASS_NAME,
-        vectorizer=_WEAVIATE_VECTORIZER,
-        schema_json_path=_WEAVIATE_SCHEMA_PATH,
-    )
+    collection_exists_instance = EmptyOperator(task_id=_COLLECTION_ALREADY_EXISTS_TASK_ID)
 
-    class_already_exists = EmptyOperator(
-        task_id=_CLASS_ALREADY_EXISTS_TASK_ID
-    )
-
-    weaviate_ready = EmptyOperator(task_id="weaviate_ready", trigger_rule="none_failed")
+    weaviate_ready_instance = EmptyOperator(task_id="weaviate_ready", trigger_rule="none_failed")
 
     @task
     def fetch_ingestion_folders_local_paths(ingestion_folders_local_paths):
@@ -145,7 +131,7 @@ def my_first_rag_dag():
         # return the full path of the folders
         return [os.path.join(ingestion_folders_local_paths, folder) for folder in folders]
 
-    fetch_ingestion_folders_local_paths_obj = fetch_ingestion_folders_local_paths(_INGESTION_FOLDERS_LOCAL_PATHS)
+    fetch_ingestion_folders_local_paths_instance = fetch_ingestion_folders_local_paths(_INGESTION_FOLDERS_LOCAL_PATHS)
 
     @task(
         map_index_template="{{ my_custom_map_index }}"
@@ -200,8 +186,8 @@ def my_first_rag_dag():
         return document_df
 
     # NOTE: Expand expects kwargs, if we just pass the pargument value, it doesnt work
-    extract_document_text_obj = extract_document_text.expand(
-        ingestion_folder_local_path=fetch_ingestion_folders_local_paths_obj
+    extract_document_text_instance_list = extract_document_text.expand(
+        ingestion_folder_local_path=fetch_ingestion_folders_local_paths_instance
     )
 
     @task(
@@ -216,8 +202,8 @@ def my_first_rag_dag():
             pd.DataFrame: The DataFrame with the text chunked.
         """
 
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-        from langchain.schema import Document
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        from langchain_core.documents import Document
 
         context = get_current_context()
         # context["my_custom_map_index"] = df.style.caption
@@ -247,22 +233,31 @@ def my_first_rag_dag():
 
         return df
 
-    chunk_text_obj = chunk_text.expand(df=extract_document_text_obj)
+    chunk_text_instance_list = chunk_text.expand(df=extract_document_text_instance_list)
 
-    ingest_data = WeaviateIngestOperator.partial(
+    ingest_data_instance_list = WeaviateIngestOperator.partial(
         task_id="ingest_data",
         conn_id="weaviate_default",
-        class_name=_WEAVIATE_CLASS_NAME,
+        collection_name=_WEAVIATE_CLASS_NAME,
         # NOTE: Use jinja templating to pass custom map index as well
         map_index_template="Ingested files from: {{ task.input_data.to_dict()['folder_path'][0] }}.",
-    ).expand(input_data=chunk_text_obj)
+    ).expand(input_data=chunk_text_instance_list)
 
-    check_class_obj >> [create_class_obj, class_already_exists] >> weaviate_ready
-    fetch_ingestion_folders_local_paths_obj >> extract_document_text_obj >> chunk_text_obj
-    # [weaviate_ready, chunk_text_obj] >> ingest_data
+
+    check_collection_instance >> [
+        create_collection(
+            conn_id=_WEAVIATE_CONN_ID,
+            collection_name=_WEAVIATE_CLASS_NAME,
+            vectorizer=VECTORIZER,
+            schema_json_path=_WEAVIATE_SCHEMA_PATH,
+        ),
+        collection_exists_instance
+    ] >> weaviate_ready_instance
+
+    fetch_ingestion_folders_local_paths_instance >> extract_document_text_instance_list >> chunk_text_instance_list
     chain(
-        [chunk_text_obj, weaviate_ready],
-        ingest_data,
+        [chunk_text_instance_list, weaviate_ready_instance],
+        ingest_data_instance_list,
     )
 
-my_first_rag_dag()
+updated_rag_dag()
