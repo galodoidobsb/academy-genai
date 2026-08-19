@@ -162,15 +162,65 @@ def query_movie_vectors_dag():
         trigger_rule="none_failed",
         conn_id=WEAVIATE_USER_CONN_ID,
         collection_name=COLLECTION_NAME,
-        # input_json=import_data_func(
-        #     text_file_path=TEXT_FILE_PATH, collection_name=COLLECTION_NAME
-        # ),
         input_data=import_data_from_source(
             text_file_path=TEXT_FILE_PATH,
             collection_name=COLLECTION_NAME
         )
     )
 
-    check_for_collection_ti >> [exists_ti, create_collection_ti] >> ingest_data_ti
+    @task
+    def query_embeddings(weaviate_conn_id: str, collection_name: str, **context):
+        "Query the Weaviate instance for movies based on the provided concepts."
+
+        # Create the hook to interact with Weaviate server
+        hook = WeaviateHook(weaviate_conn_id)
+
+        # Get concepts passed to the DAG
+        movie_concepts = context["params"]["movie_concepts"]
+
+        # Retrieve the collection stored in in Weaviate
+        my_movie_collection = hook.get_collection(collection_name)
+
+        # Use the near_text search to retrieve the most relevant movie
+        movie = my_movie_collection.query.near_text(
+            query=movie_concepts,
+            return_properties=["title", "year", "genre", "description"],
+            limit=1,
+        )
+
+        movie_object = movie.objects[0]
+
+        movie_title = movie_object.properties["title"]
+        movie_year = movie_object.properties["year"]
+        movie_genre = movie_object.properties["genre"]
+        movie_description = movie_object.properties["description"]
+
+        t_log.info(f"You should watch {movie_title}!")
+        t_log.info(
+            f"It was filmed in {int(movie_year)} and belongs to the {movie_genre} genre."
+        )
+        t_log.info(f"Description: {movie_description}")
+
+    query_embeddings_ti = query_embeddings(weaviate_conn_id=WEAVIATE_USER_CONN_ID, collection_name=COLLECTION_NAME)
+
+    # chain(
+    #     check_for_collection(
+    #         conn_id=WEAVIATE_USER_CONN_ID, collection_name=COLLECTION_NAME
+    #     ),
+    #     [
+    #         create_collection(
+    #             conn_id=WEAVIATE_USER_CONN_ID,
+    #             collection_name=COLLECTION_NAME,
+    #             vectorizer=VECTORIZER,
+    #         ),
+    #         collection_exists,
+    #     ],
+    #     import_data,
+    #     query_embeddings(
+    #         weaviate_conn_id=WEAVIATE_USER_CONN_ID, collection_name=COLLECTION_NAME
+    #     ),
+    # )
+
+    check_for_collection_ti >> [exists_ti, create_collection_ti] >> ingest_data_ti >> query_embeddings_ti
 
 query_movie_vectors_dag()
