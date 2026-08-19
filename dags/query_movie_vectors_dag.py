@@ -6,10 +6,9 @@ movie descriptions, generate vectors for them, and query the vectors for movies 
 concept descriptions.
 """
 
-from airflow.decorators import dag, task
-from airflow.models.param import Param
-from airflow.operators.empty import EmptyOperator
-from airflow.models.baseoperator import chain
+from airflow.sdk import dag, task, Param
+from airflow.sdk.bases.operator import chain
+from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 from airflow.providers.weaviate.operators.weaviate import WeaviateIngestOperator
 from weaviate.util import generate_uuid5
