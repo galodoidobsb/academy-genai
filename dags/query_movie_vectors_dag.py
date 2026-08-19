@@ -7,7 +7,6 @@ concept descriptions.
 """
 
 from airflow.sdk import dag, task, Param
-# from airflow.sdk.bases.operator import chain
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 from airflow.providers.weaviate.operators.weaviate import WeaviateIngestOperator
@@ -221,7 +220,9 @@ def query_movie_vectors_dag():
             f"It was filmed in {int(movie_year)} and belongs to the {movie_genre} genre."
         )
         t_log.info(f"Description: {movie_description}")
-        t_log.info(f"The search has {search_certainty} certainty and {search_distance} distance.")
+        t_log.info(
+            f"The search is {(100*search_certainty):.2f}% certain and has a distance of {search_distance:.4f}."
+        )
 
 
     query_embeddings_ti = query_embeddings(weaviate_conn_id=WEAVIATE_USER_CONN_ID, collection_name=COLLECTION_NAME)
