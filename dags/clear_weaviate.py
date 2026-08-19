@@ -6,7 +6,7 @@ Meant to be used during development to reset Weaviate.
 Please use it with caution.
 """
 
-from airflow.sdk import dag, task
+from airflow.sdk import dag, task, Param
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 import os
 
@@ -17,27 +17,38 @@ WEAVIATE_COLLECTION_TO_DELETE = "MY_SCHEMA_TO_DELETE"
 
 
 @dag(
-    dag_display_name="🧼 Delete a Schema in Weaviate",
+    dag_display_name="🧼 Delete a Schema/Collection in Weaviate",
     schedule=None,
     start_date=None,
     catchup=False,
     description="CAUTION! Will delete a collection in Weaviate!",
-    tags=["helper"]
+    tags=["helper"],
+    params={
+        "collection_name": Param(
+            WEAVIATE_COLLECTION_TO_DELETE,
+            type="string",
+            description="Weaviate collection name to delete"
+
+        )
+    }
 )
 def clear_weaviate():
 
     @task(
-        task_display_name=f"Delete {WEAVIATE_COLLECTION_TO_DELETE} in Weaviate",
+        task_display_name=f"Delete collection in Weaviate",
     )
-    def delete_all_weaviate_schemas(collection_to_delete=None):
+    def delete_weaviate_collection(**context):
 
         # connect to Weaviate using the Airflow connection `conn_id`
         hook = WeaviateHook(WEAVIATE_CONN_ID)
 
-        # delete collection
-        hook.delete_collections(collection_to_delete, if_error="stop")
+        # Get param passed to the DAG
+        collection_name = context["params"]["collection_name"]
 
-    delete_all_weaviate_schemas(collection_to_delete=WEAVIATE_COLLECTION_TO_DELETE)
+        # delete collection
+        hook.delete_collections(collection_name, if_error="stop")
+
+    delete_weaviate_collection_ti = delete_weaviate_collection()
 
 
 clear_weaviate()
