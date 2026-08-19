@@ -33,15 +33,11 @@ CREATE_TASK_ID = "create_collection"
 
 # Weaviate constants
 WEAVIATE_USER_CONN_ID = "weaviate_default"
-# set the vectorizer to text2vec-openai if you want to use the openai model
-# note that using the OpenAI vectorizer requires a valid API key in the
-# AIRFLOW_CONN_WEAVIATE_DEFAULT connection.
-# If you want to use a different vectorizer model
-# (https://weaviate.io/developers/weaviate/model-providers)
-# make sure to also add it to the weaviate configuration's `ENABLE_MODULES` list
-# for example in the docker-compose.override.yml file
 VECTORIZER = wvcc.Configure.Vectorizer.text2vec_transformers()
-OPEN_AI_VECTORIZER = wvcc.Configure.Vectorizer.text2vec_openai(model="ada")
+# NOTE: using the OpenAI vectorizer requires a valid API key in the AIRFLOW_CONN_WEAVIATE_DEFAULT connection.
+# If you want to use a different vectorizer model (https://weaviate.io/developers/weaviate/model-providers)
+# make sure to also add it to the weaviate configuration's `ENABLE_MODULES` list
+OPEN_AI_VECTORIZER = wvcc.Configure.Vectorizer.text2vec_openai(model="text-embedding-3-small")
 
 # Start logger
 t_log = logging.getLogger("airflow.task")
@@ -106,6 +102,7 @@ def ingest_movie_vectors_dag():
 
     collections_exists_ti = display_objects_in_collection(weaviate_conn_id=WEAVIATE_USER_CONN_ID, collection_name=COLLECTION_NAME)
 
+    # NOTE: Vectorizer is defined when creating the COLLECTION, not when ingesting objects
     @task(task_id=CREATE_TASK_ID)
     def create_collection(collection_name: str, vectorizer_config: str) -> None:
         "Create a collection with the provided name and vectorizer."
@@ -118,12 +115,11 @@ def ingest_movie_vectors_dag():
 
     create_collection_ti = create_collection(collection_name=COLLECTION_NAME, vectorizer_config=OPEN_AI_VECTORIZER)
 
-    # NOTE: This should not be a task, because the Weaviate Operator downstream
-    # requires a python callable
-    # TODO: After validating the whole DAG, we should refactor this to separate
-    # data import/load/treatment from ingestion. Also, we should evaluate
-    # a new version where we decouple vectorization from ingestion
-    def import_data_from_source(text_file_path: str, collection_name: str) -> List:
+    @task(
+        task_id="read_data_from_source",
+        trigger_rule="none_failed",
+    )
+    def read_data_from_source(text_file_path: str, collection_name: str) -> List:
         "Read the text file and create a list of dicts for ingestion to Weaviate."
 
         with open(text_file_path, "r") as f:
@@ -159,25 +155,21 @@ def ingest_movie_vectors_dag():
                     }
                 )
 
-            t_log.info(f"Created a list with {len(data)} elements while skipping {num_skipped_lines} lines.")
+        t_log.info(f"Created a list with {len(data)} elements while skipping {num_skipped_lines} lines.")
+        return data
 
-            # NOTE: Data is returned inside the context manager. Why?
-            return data
+    read_data_from_source_ti = read_data_from_source(text_file_path=TEXT_FILE_PATH, collection_name=COLLECTION_NAME)
 
     # NOTE: The operator is extremely flexible:
     # If data does not have vectors, it creates them before ingesting
     ingest_data_ti = WeaviateIngestOperator(
         task_id="ingest_data",
-        trigger_rule="none_failed",
         conn_id=WEAVIATE_USER_CONN_ID,
         collection_name=COLLECTION_NAME,
-        input_data=import_data_from_source(
-            text_file_path=TEXT_FILE_PATH,
-            collection_name=COLLECTION_NAME
-        ),
-        uuid_column="movie_id", # This param is essential to avoid duplicates insertion
+        input_data=read_data_from_source_ti,
+        uuid_column="movie_id", # This param is required to avoid duplicates insertion
     )
 
-    check_for_collection_ti >> [collections_exists_ti, create_collection_ti] >> ingest_data_ti
+    check_for_collection_ti >> [collections_exists_ti, create_collection_ti] >> read_data_from_source_ti >> ingest_data_ti
 
 ingest_movie_vectors_dag()
