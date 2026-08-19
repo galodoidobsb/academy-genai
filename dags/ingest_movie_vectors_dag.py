@@ -44,7 +44,7 @@ t_log = logging.getLogger("airflow.task")
 
 
 @dag(
-    dag_display_name="🎞️​ Ingest movies into vector database",
+    dag_display_name="​​🎬​ Ingest movies into vector database",
     start_date=datetime(2026, 8, 1),
     schedule=None,
     catchup=False,
