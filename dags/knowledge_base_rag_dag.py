@@ -34,6 +34,13 @@ _WEAVIATE_USER_CONN_ID = "weaviate_default"
     doc_md=__doc__,
     description="Retrieves content from vectorized database related to the user input.",
     params={
+        "collection_name": Param(
+            KNOWLEDGE_BASE_COLLECTION,
+            type="string",
+            description=(
+                "Collection name on the Weaviate database."
+            ),
+        ),
         "user_input": Param(
             None,
             type="string",
@@ -46,8 +53,11 @@ _WEAVIATE_USER_CONN_ID = "weaviate_default"
 def knowledge_base_rag_dag():
 
     @task
-    def check_collection(conn_id: str, collection_name: str) -> None:
+    def check_collection(conn_id: str, **context) -> None:
         "Check if the provided collection exists and has objects."
+
+        # Get param passed to the DAG
+        collection_name = context["params"]["collection_name"]
 
         # Create a hook to interact with the Weaviate server
         hook = WeaviateHook(conn_id=conn_id)
@@ -66,51 +76,69 @@ def knowledge_base_rag_dag():
         else:
             raise AirflowFailException(f"The collection {collection_name} does not exist yet. Please, create it and ingest data before querying.")
 
-    check_collection_ti = check_collection(conn_id=_WEAVIATE_USER_CONN_ID, collection_name=KNOWLEDGE_BASE_COLLECTION)
+    check_collection_ti = check_collection(conn_id=_WEAVIATE_USER_CONN_ID)  
 
-    check_collection_ti
+    # TODO: Refactor task to enable using near_text or hybrid search
+    @task
+    def query_embeddings(weaviate_conn_id: str, search_method: str="near_text", **context) -> None:
+        "Query the Weaviate instance for documentation chunks related to the user input."
 
-    # @task
-    # def query_embeddings(weaviate_conn_id: str, collection_name: str, **context) -> None:
-    #     "Query the Weaviate instance for movies based on the provided concepts."
+        # Get user input passed to the DAG
+        collection_name = context["params"]["collection_name"]
+        user_input = context["params"]["user_input"]
 
-    #     # Create the hook to interact with Weaviate server
-    #     hook = WeaviateHook(weaviate_conn_id)
+        # Create the hook to interact with Weaviate server
+        hook = WeaviateHook(weaviate_conn_id)
 
-    #     # Get concepts passed to the DAG
-    #     movie_concepts = context["params"]["movie_concepts"]
+        # Retrieve the collection stored in in Weaviate
+        knowledge_base_collection = hook.get_collection(collection_name)
 
-    #     # Retrieve the collection stored in in Weaviate
-    #     my_movie_collection = hook.get_collection(collection_name)
+        # TODO: Experiment with hybrid search as well
+        # Use the near_text search to retrieve the most relevant chunks
+        # document_chunks = knowledge_base_collection.query.near_text(
+        #     query=user_input,
+        #     limit=3,    # This is an interesting param to experiment with
+        #     return_properties=["document_title", "section_title", "chunk_content"],
+        #     # Request confidence metrics in metadata
+        #     return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, creation_time=True)             
+        # )
+        document_chunks = knowledge_base_collection.query.hybrid(
+            query=user_input,
+            limit=3,    # This is an interesting param to experiment with
+            alpha=0.8,
+            return_properties=["document_title", "section_title", "chunk_content"],
+            # Request confidence metrics in metadata
+            return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, score=True, creation_time=True)             
+        )
 
-    #     # Use the near_text search to retrieve the most relevant movie
-    #     movie = my_movie_collection.query.near_text(
-    #         query=movie_concepts,
-    #         limit=1,
-    #         return_properties=["title", "year", "genre", "description"],
-    #         # Request confidence metrics in metadata
-    #         return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, creation_time=True)             
-    #     )
+        t_log.info(f"Chunks retrieved: {len(document_chunks.objects)}.")
 
-    #     movie_object = movie.objects[0]
+        for chunk in document_chunks.objects:
+            document_title = chunk.properties["document_title"]
+            section_title = chunk.properties["section_title"]
+            chunk_content = chunk.properties["chunk_content"]
+            # Properties of the near_text search
+            search_distance = chunk.metadata.distance
+            search_certainty = chunk.metadata.certainty
+            search_score = chunk.metadata.score
+            print("Search metadata: ", chunk.metadata)
 
-    #     movie_title = movie_object.properties["title"]
-    #     movie_year = movie_object.properties["year"]
-    #     movie_genre = movie_object.properties["genre"]
-    #     movie_description = movie_object.properties["description"]
+            t_log.info(f"Chunk found in document: {document_title}")
+            t_log.info(f"Chunk extracted from section: {section_title}")
+            t_log.info(f"Chunk content: {chunk_content}")
+            t_log.info(
+                f"This chunk search score is {(100*search_score):.2f}%."
+            )
 
-    #     search_distance = movie_object.metadata.distance
-    #     search_certainty = movie_object.metadata.certainty
+            # t_log.info(
+            #     f"This chunk search is {(100*search_certainty):.2f}% certain and has a distance of {search_distance:.4f}."
+            # )
 
-    #     t_log.info(f"You should watch {movie_title}!")
-    #     t_log.info(
-    #         f"It was filmed in {int(movie_year)} and belongs to the {movie_genre} genre."
-    #     )
-    #     t_log.info(f"Description: {movie_description}")
-    #     t_log.info(
-    #         f"The search is {(100*search_certainty):.2f}% certain and has a distance of {search_distance:.4f}."
-    #     )
+    query_embeddings_ti = query_embeddings(weaviate_conn_id=_WEAVIATE_USER_CONN_ID)
 
-    # query_embeddings_ti = query_embeddings(weaviate_conn_id=WEAVIATE_USER_CONN_ID, collection_name=COLLECTION_NAME)
+    # TODO: Next step is to implement the related-objects retrieval
+    # Only retrieve chunks of a defined score threshold (experiment with 0.7 or 0.8)
+
+    check_collection_ti >> query_embeddings_ti
 
 knowledge_base_rag_dag()
