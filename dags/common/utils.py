@@ -1,14 +1,11 @@
 from collections.abc import Iterator
-from typing import TypedDict
+from typing import TypedDict, List
+from pathlib import Path
 
 import mistletoe
 from mistletoe.block_token import Heading
 from mistletoe.markdown_renderer import MarkdownRenderer
 
-# NOTE: This is a good chance to practice a generator design
-# Instead of loading the full content in memory before returning, we can
-# build a method that returns each section (heading) and its contents
-# without the need to process the whole document at once
 def extract_headers_mistletoe(file_path="include/data/guides/dynamic-tasks.md"):
     with open(file_path, "r", encoding="utf-8") as f:
         doc = mistletoe.Document(f)
@@ -26,19 +23,26 @@ class MarkdownSection(TypedDict):
     """Represent one heading-based section extracted from a Markdown document.
 
     Attributes:
-        title_index: Position of the heading in the document's top-level tokens.
-        parent_index: Position of the nearest parent heading, or ``None`` when
+        section_id: UUID5 composed by `document_title`, `section_title`,
+            `section_title_index`, and `parent_section_index`.
+        document_title: Filename (without extension) of the source document.
+        document_path: Source document original file path.
+        section_title_index: Position of the heading in the document's top-level tokens.
+        parent_section_index: Position of the nearest parent heading, or ``None`` when
             the heading has no parent.
-        title: Plain-text content of the heading.
-        reference: Markdown anchor generated from the heading title.
-        text: Markdown content between this heading and the next heading.
+        section_title: Plain-text content of the heading.
+        section_reference: Markdown anchor generated from the heading title.
+        section_content: Markdown content between this heading and the next heading.
     """
 
-    title_index: int
-    parent_index: int | None
-    title: str
-    reference: str
-    text: str
+    section_id: str
+    document_title: str
+    document_path: str
+    section_title_index: int
+    parent_section_index: int | None
+    section_title: str
+    section_reference: str
+    section_content: str
 
 # NOTE: Create another function to extract the initial heading text from the MD file
 # We should define a fixed schema at first, so all docs have to follow it:
@@ -49,14 +53,10 @@ class MarkdownSection(TypedDict):
 # extra: WIP - ASK TALES
 # ---
 
-
-# NOTE: To use this, I'll implement the following on the consumer side:
-# Retrieve related sections in the following manner:
-# If level = 2, all children (recursively)
-# If level <=3, all children (recursively) + all siblings (same level and same parent) + all parents (object_level < level and object level >= 2)
-def extract_sections_from_markdown_v2(
+def extract_sections_from_markdown(
     file_path: str = "include/data/guides/dynamic-tasks.md",
     encoding: str = "utf-8",
+    collection_name: str = None,
 ) -> Iterator[MarkdownSection]:
     """Parse a Markdown document into non-overlapping heading sections.
 
@@ -77,6 +77,7 @@ def extract_sections_from_markdown_v2(
     import mistletoe
     from mistletoe.block_token import Heading
     from mistletoe.markdown_renderer import MarkdownRenderer
+    from weaviate.util import generate_uuid5
 
     # The renderer converts the parsed block tokens back into Markdown text.
     with MarkdownRenderer() as renderer:
@@ -85,12 +86,13 @@ def extract_sections_from_markdown_v2(
             doc = mistletoe.Document(f)
 
         # Top-level blocks include headings, paragraphs, lists, code blocks, etc.
-        for index, heading in enumerate(doc.children):
-            # Only headings can start a new section.
-            if not isinstance(heading, Heading):
+        for index, token in enumerate(doc.children):
+            # Only headings can start a new section. Other token types exit the loop
+            if not isinstance(token, Heading):
                 continue
 
             # A heading contains inline child tokens that make up its title.
+            heading = token
             title = "".join(
                 child.content
                 for child in heading.children
@@ -98,13 +100,13 @@ def extract_sections_from_markdown_v2(
             )
 
             # These diagnostic prints expose the heading's parsed structure.
-            for child in heading.children:
-                if hasattr(child, "content"):
-                    print("Index: ", index)
-                    print("Heading content: ", heading.content)
-                    print("Heading level: ", heading.level)
-                    print("Child: ", child)
-                    print("Child content: ", child.content)
+            # for child in heading.children:
+            #     if hasattr(child, "content"):
+            #         print("Index: ", index)
+            #         print("Heading content: ", heading.content)
+            #         print("Heading level: ", heading.level)
+            #         print("Child: ", child)
+            #         print("Child content: ", child.content)
 
             # Search backward for the closest heading above this one in the
             # hierarchy: an H2 is a parent of an H3, for example.
@@ -118,7 +120,7 @@ def extract_sections_from_markdown_v2(
                     parent_index = previous_index
                     break
 
-            print("Parent index: ", parent_index)
+            # print("Parent index: ", parent_index)
 
             # Render blocks after this heading, stopping at any new heading.
             # This boundary prevents parent and nested sections from overlapping.
@@ -129,19 +131,41 @@ def extract_sections_from_markdown_v2(
                     break
                 section.append(renderer.render(token))
 
+            document_title = Path(file_path).stem
+
             # Yielding here makes sections available to the caller one at a time.
             md_dict: MarkdownSection = {
-                "title_index": index,
-                "parent_index": parent_index,
-                "title": title,
-                "reference": f"#{title.lower().replace(' ', '-')}",
-                "text": "".join(section).strip(),
+                "section_id": generate_uuid5(
+                    identifier=[
+                        document_title,
+                        title,
+                        index,
+                        parent_index,
+                    ],
+                    namespace=collection_name,
+                ),
+                "document_title": document_title,
+                "document_path": file_path,
+                "section_title_index": index,
+                "parent_section_index": parent_index,
+                "section_title": title,
+                "section_reference": f"#{title.lower().replace(' ', '-')}",
+                "section_content": "".join(section).strip(),
             }
 
             yield md_dict
 
+# NOTE: Let's first design the whole document ingestion, because we will need that
+# to design the retrieval of relevant document sections
+
+# NOTE: To use this, I'll implement the following on the consumer side:
+# Retrieve related sections in the following manner:
+# If level = 2, all children (recursively)
+# If level <=3, all children (recursively) + all siblings (same level and same parent) + all parents (object_level < level and object level >= 2)
+def retrieve_sections_from_weaviate(section_index: int) -> List[MarkdownSection]:
+    extract_sections_from_markdown()
 
 if __name__ == "__main__":
-    document = extract_sections_from_markdown_v2()
+    document = extract_sections_from_markdown()
     for section in document:
         print(section, sep="\n")
