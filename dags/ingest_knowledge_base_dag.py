@@ -126,29 +126,53 @@ def ingest_knowledge_base_dag():
     )
     def load_data_group(group_file_path: str, collection_name: str):
 
+        # Import inside the group to avoid DAG parsing overhead
+        # TODO: Check if we should actually place the import here, as it
+        # will be loaded for each group instance
+        # Does it make sense to move the import to the DAG level?
+        from common.utils import extract_sections_from_markdown
+
         @task(
             map_index_template="{{ document_map_index }}"
         )
-        def extract_sections(document_path):
+        def extract_sections(document_path, collection_name: str):
 
             context = get_current_context()
             context["document_map_index"] = f"Document from: {document_path}"
 
-            return document_path
+            sections_generator = extract_sections_from_markdown(
+                file_path=document_path,
+                collection_name=collection_name,
+            )
 
-        extract_sections_ti = extract_sections(document_path=group_file_path)
+            # TODO: Check if returning a dataframe is the best option here
+            return pd.DataFrame(sections_generator)
+
+        extract_sections_ti = extract_sections(document_path=group_file_path, collection_name=collection_name)
 
         @task(
             map_index_template="{{ document_map_index }}"                
         )
-        def load_into_weaviate(document):
+        def chunk_document(df):
 
             context = get_current_context()
-            context["document_map_index"] = document
+            context["document_map_index"] = f"Chunks from document: {df['document_title'].iloc[0]}"
 
-        load_into_weaviate_ti = load_into_weaviate(document=extract_sections_ti)
+            return df
 
-        extract_sections_ti >> load_into_weaviate_ti
+        chunk_document_ti = chunk_document(df=extract_sections_ti)
+
+        @task(
+            map_index_template="{{ document_map_index }}"                
+        )
+        def load_into_weaviate(df):
+
+            context = get_current_context()
+            context["document_map_index"] = f"Sections from document: {df['document_title'].iloc[0]}"
+
+        load_into_weaviate_ti = load_into_weaviate(df=chunk_document_ti)
+
+        extract_sections_ti >> chunk_document_ti >> load_into_weaviate_ti
 
     load_data_group_instance = load_data_group.partial(collection_name=KNOWLEDGE_BASE_COLLECTION).expand(group_file_path=fetch_documents_paths_ti)
 
