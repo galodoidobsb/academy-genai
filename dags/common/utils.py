@@ -40,6 +40,16 @@ class MarkdownSection(TypedDict):
     reference: str
     text: str
 
+# NOTE: Create another function to extract the initial heading text from the MD file
+# We should define a fixed schema at first, so all docs have to follow it:
+
+# ---
+# title: "Datasets and data-aware scheduling in Airflow"
+# description: "Using datasets to implement DAG dependencies and scheduling in Airflow."
+# extra: WIP - ASK TALES
+# ---
+
+
 # NOTE: To use this, I'll implement the following on the consumer side:
 # Retrieve related sections in the following manner:
 # If level = 2, all children (recursively)
