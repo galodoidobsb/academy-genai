@@ -11,12 +11,15 @@ from pendulum import datetime, duration
 from common.constants import KNOWLEDGE_BASE_COLLECTION
 import weaviate.classes as wvc
 import logging
+import pandas as pd
 
 # Start logger
 t_log = logging.getLogger("airflow.task")
 
 # Weaviate constants
 _WEAVIATE_USER_CONN_ID = "weaviate_default"
+_WEAVIATE_RETURN_PROPERTIES = ""
+_WEAVIATE_RETURN_METADATA = ""
 
 
 @dag(
@@ -106,39 +109,73 @@ def knowledge_base_rag_dag():
             query=user_input,
             limit=3,    # This is an interesting param to experiment with
             alpha=0.8,
-            return_properties=["document_title", "section_title", "chunk_content"],
+            return_properties=["document_title", "section_title", "chunk_content", "section_title_index", "parent_section_index"],
             # Request confidence metrics in metadata
-            return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, score=True, creation_time=True)             
+            return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, score=True, explain_score=True, creation_time=True)             
         )
 
         t_log.info(f"Chunks retrieved: {len(document_chunks.objects)}.")
 
+        chunks = []
+
         for chunk in document_chunks.objects:
+            chunk_id = str(chunk.uuid)
             document_title = chunk.properties["document_title"]
             section_title = chunk.properties["section_title"]
             chunk_content = chunk.properties["chunk_content"]
             # Properties of the near_text search
-            search_distance = chunk.metadata.distance
-            search_certainty = chunk.metadata.certainty
+            # search_distance = chunk.metadata.distance
+            # search_certainty = chunk.metadata.certainty
+            # Property of the hybrid search
             search_score = chunk.metadata.score
-            print("Search metadata: ", chunk.metadata)
+            explain_score = chunk.metadata.explain_score
+
+            chunks.append(
+                {
+                    "chunk_id": chunk_id,
+                    "chunk_content": chunk_content,
+                    "document_title": document_title,
+                    "section_title": section_title,
+                    "section_title_index": chunk.properties["section_title_index"],
+                    "parent_section_index": chunk.properties["parent_section_index"],
+                    "search_score": search_score,
+                    "explain_score": explain_score,
+                }
+            )
 
             t_log.info(f"Chunk found in document: {document_title}")
             t_log.info(f"Chunk extracted from section: {section_title}")
-            t_log.info(f"Chunk content: {chunk_content}")
-            t_log.info(
-                f"This chunk search score is {(100*search_score):.2f}%."
-            )
+            # t_log.info(f"Chunk content: {chunk_content}")
+            t_log.info(f"Chunk search score is {(100*search_score):.2f}%.")
+            # t_log.info(f"Chunk search certainty is {(100*search_certainty):.2f}%.")
+            # t_log.info(f"Chunk search distance is {search_distance:.4f}.")
 
-            # t_log.info(
-            #     f"This chunk search is {(100*search_certainty):.2f}% certain and has a distance of {search_distance:.4f}."
-            # )
+        # Weaviate Objects are not serializable by default.
+        # We need to transform them to dicts or a Dataframe
+        # Pydantic is not required here because the output is deterministic, so we
+        # can simply map Weaviate object to dicts/dataframe
+
+        # chunks_df = pd.DataFrame(document_chunks.objects)
+        return chunks
 
     query_embeddings_ti = query_embeddings(weaviate_conn_id=_WEAVIATE_USER_CONN_ID)
+
+    # NOTE: Após o retrieval, precisamos desduplicar os chunks (utilizar o chunk_id)
+    # Também seria importante ORDERNAR os chunks para tentar "reconstruir" a seção
+    # Quando uma seção for quebrada em muitos chunks, precisamos reordenar esses chunks
+    # para que a documentação faça sentido
+    # NOTE: Se a ordenação for um problema (como adicionar um "índice" no splitter???)
+    # a solução mais fácil para o MVP seria então simplesmente PULAR o splitter e ingerir
+    # cada seção "por inteiro"
+    @task
+    def retrieve_related_objects(weaviate_conn_id: str, chunks):
+        pass
+
+    retrieve_related_objects_ti = retrieve_related_objects(weaviate_conn_id=_WEAVIATE_USER_CONN_ID, chunks=query_embeddings_ti)
 
     # TODO: Next step is to implement the related-objects retrieval
     # Only retrieve chunks of a defined score threshold (experiment with 0.7 or 0.8)
 
-    check_collection_ti >> query_embeddings_ti
+    check_collection_ti >> query_embeddings_ti >> retrieve_related_objects_ti
 
 knowledge_base_rag_dag()
