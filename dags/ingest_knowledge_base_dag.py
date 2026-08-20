@@ -5,7 +5,6 @@ WIP - Description
 """
 
 from airflow.sdk import dag, task, task_group, get_current_context
-from airflow.sdk.bases.operator import chain
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 from airflow.providers.weaviate.operators.weaviate import WeaviateIngestOperator
@@ -13,7 +12,6 @@ from pendulum import datetime, duration
 from pathlib import Path
 from typing import List
 import os
-import re
 import logging
 import pandas as pd
 import weaviate.classes.config as wvcc
@@ -22,22 +20,6 @@ from common.constants import *
 
 # Set logging
 t_log = logging.getLogger("airflow.task")
-
-# Private variables used in the DAG
-_INGESTION_FOLDERS_LOCAL_PATHS = os.getenv("INGESTION_FOLDERS_LOCAL_PATHS")
-
-_WEAVIATE_CONN_ID = os.getenv("WEAVIATE_CONN_ID")
-_WEAVIATE_CLASS_NAME = os.getenv("WEAVIATE_CLASS_NAME")
-_WEAVIATE_SCHEMA_PATH = os.getenv("WEAVIATE_SCHEMA_PATH")
-
-_CREATE_COLLECTION_TASK_ID = "create_collection"
-_COLLECTION_ALREADY_EXISTS_TASK_ID = "collection_already_exists"
-
-VECTORIZER = wvcc.Configure.Vectorizer.text2vec_transformers()
-# VECTORIZER = wvcc.Configure.Vectorizer.text2vec_openai(model="ada")
-
-
-# NEW CONSTANTS
 
 # Dag control constants
 _EXISTS_TASK_ID = "collection_exists"
