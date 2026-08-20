@@ -4,13 +4,14 @@
 WIP - Description
 """
 
-from airflow.sdk import dag, task, get_current_context
+from airflow.sdk import dag, task, task_group, get_current_context
 from airflow.sdk.bases.operator import chain
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 from airflow.providers.weaviate.operators.weaviate import WeaviateIngestOperator
 from pendulum import datetime, duration
 from pathlib import Path
+from typing import List
 import os
 import re
 import logging
@@ -105,70 +106,105 @@ def ingest_knowledge_base_dag():
     weaviate_ready_instance = EmptyOperator(task_id="weaviate_ready", trigger_rule="none_failed")
 
     @task
-    def fetch_ingestion_paths(ingestion_folders_local_paths):
+    def fetch_documents_paths(ingestion_folders_paths, file_format: str = "*.md") -> List[str]:
 
-        # get all the folders in the given location
-        folders = os.listdir(ingestion_folders_local_paths)
+        # Define the directory path
+        dir_path = Path(ingestion_folders_paths)
 
-        # return the full path of the folders
-        return [os.path.join(ingestion_folders_local_paths, folder) for folder in folders]
+        # Get all files recursively
+        files = [str(f) for f in dir_path.rglob(file_format) if f.is_file()]
 
-    fetch_ingestion_paths_ti = fetch_ingestion_paths(_INGESTION_PATH)
+        return files
 
-    check_for_collection_ti >> [collections_exists_ti, create_collection_ti] >> weaviate_ready_instance >> fetch_ingestion_paths_ti
+    fetch_documents_paths_ti = fetch_documents_paths(_INGESTION_PATH)
 
-    # NOTE: Move the function to the utils module
-    @task(
-        map_index_template="{{ document_map_index }}"
+    # Create a group
+    @task_group(
+        group_id=f"load_data_pipeline",
+        tooltip=f"Read markdown files in sections, and load each document objects into Weaviate.",
+        prefix_group_id=False,
     )
-    def extract_document_text(ingestion_folder_local_path):
-        """
-        Extract information from markdown files in a folder.
-        Args:
-            folder_path (str): Path to the folder containing markdown files.
-        Returns:
-            pd.DataFrame: A list of dictionaries containing the extracted information.
-        """
+    def load_data_group(group_file_path: str, collection_name: str):
 
-        # NOTE: We need the get_current_context method here to MODIFY the current context,
-        # passing he map index value at runtime
-        # When using def task_method(arg, **context), we can only access it, but we
-        # can't update the "root" dictionary object
-        context = get_current_context()
-        context["document_map_index"] = ingestion_folder_local_path
-
-        files = [
-            f for f in os.listdir(ingestion_folder_local_path) if f.endswith(".md")
-        ]
-
-        titles = []
-        texts = []
-
-        for file in files:
-            # file_path = os.path.join(ingestion_folder_local_path, file)
-            file_path = Path(ingestion_folder_local_path) / Path(file)
-            
-            titles.append(file_path.stem)
-            # titles.append(file.split(".")[0])
-
-            with open(file_path, "r", encoding="utf-8") as f:
-                texts.append(f.read())
-
-        document_df = pd.DataFrame(
-            {
-                "folder_path": ingestion_folder_local_path,
-                "title": titles,
-                "text": texts,
-            }
+        @task(
+            map_index_template="{{ document_map_index }}"
         )
-        # NOTE: Inserting the caption metadata is not working
-        # document_df.style.set_caption(f"DataFrame for {ingestion_folder_local_path} folder files")
+        def extract_sections(document_path):
 
-        t_log.info(f"DataFrame general structure: {document_df.info()}")
-        t_log.info(f"DataFrame main stats: {document_df.describe()}")
-        t_log.info(f"DataFrame first rows: {document_df.head()}")
+            context = get_current_context()
+            context["document_map_index"] = f"Document from: {document_path}"
 
-        return document_df
+            return document_path
+
+        extract_sections_ti = extract_sections(document_path=group_file_path)
+
+        @task(
+            map_index_template="{{ document_map_index }}"                
+        )
+        def load_into_weaviate(document):
+
+            context = get_current_context()
+            context["document_map_index"] = document
+
+        load_into_weaviate_ti = load_into_weaviate(document=extract_sections_ti)
+
+        extract_sections_ti >> load_into_weaviate_ti
+
+    load_data_group_instance = load_data_group.partial(collection_name=KNOWLEDGE_BASE_COLLECTION).expand(group_file_path=fetch_documents_paths_ti)
+
+    check_for_collection_ti >> [collections_exists_ti, create_collection_ti] >> weaviate_ready_instance >> fetch_documents_paths_ti >> load_data_group_instance
+
+    # @task(
+    #     map_index_template="{{ document_map_index }}"
+    # )
+    # def extract_document_text(ingestion_folder_local_path):
+    #     """
+    #     Extract information from markdown files in a folder.
+    #     Args:
+    #         folder_path (str): Path to the folder containing markdown files.
+    #     Returns:
+    #         pd.DataFrame: A list of dictionaries containing the extracted information.
+    #     """
+
+    #     # NOTE: We need the get_current_context method here to MODIFY the current context,
+    #     # passing he map index value at runtime
+    #     # When using def task_method(arg, **context), we can only access it, but we
+    #     # can't update the "root" dictionary object
+    #     context = get_current_context()
+    #     context["document_map_index"] = ingestion_folder_local_path
+
+    #     files = [
+    #         f for f in os.listdir(ingestion_folder_local_path) if f.endswith(".md")
+    #     ]
+
+    #     titles = []
+    #     texts = []
+
+    #     for file in files:
+    #         # file_path = os.path.join(ingestion_folder_local_path, file)
+    #         file_path = Path(ingestion_folder_local_path) / Path(file)
+            
+    #         titles.append(file_path.stem)
+    #         # titles.append(file.split(".")[0])
+
+    #         with open(file_path, "r", encoding="utf-8") as f:
+    #             texts.append(f.read())
+
+    #     document_df = pd.DataFrame(
+    #         {
+    #             "folder_path": ingestion_folder_local_path,
+    #             "title": titles,
+    #             "text": texts,
+    #         }
+    #     )
+    #     # NOTE: Inserting the caption metadata is not working
+    #     # document_df.style.set_caption(f"DataFrame for {ingestion_folder_local_path} folder files")
+
+    #     t_log.info(f"DataFrame general structure: {document_df.info()}")
+    #     t_log.info(f"DataFrame main stats: {document_df.describe()}")
+    #     t_log.info(f"DataFrame first rows: {document_df.head()}")
+
+    #     return document_df
 
     # # NOTE: Expand expects kwargs, if we just pass the pargument value, it doesnt work
     # extract_document_text_instance_list = extract_document_text.expand(
