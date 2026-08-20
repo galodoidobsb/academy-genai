@@ -53,6 +53,8 @@ class MarkdownSection(TypedDict):
 # extra: WIP - ASK TALES
 # ---
 
+# TODO: Evaluate if we need to extract sections like this, or if we should
+# leave the splitting to the chunk task, passing the full document content
 def extract_sections_from_markdown(
     file_path: str = "include/data/guides/dynamic-tasks.md",
     encoding: str = "utf-8",
@@ -133,6 +135,9 @@ def extract_sections_from_markdown(
 
             document_title = Path(file_path).stem
 
+            # TODO: Remove collection_name from namespace
+            # Use native uuid5 lib instead
+            # The collection_name will be added downstream when chunking the section
             # Yielding here makes sections available to the caller one at a time.
             md_dict: MarkdownSection = {
                 "section_id": generate_uuid5(

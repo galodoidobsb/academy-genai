@@ -146,6 +146,8 @@ def ingest_knowledge_base_dag():
             )
 
             # TODO: Check if returning a dataframe is the best option here
+            # TODO: Should we "fix" the types inside the df before returning it?
+            # Should we go with a Pydantic object instead of a dataframe to validate data? Future version
             return pd.DataFrame(sections_generator)
 
         extract_sections_ti = extract_sections(document_path=group_file_path, collection_name=collection_name)
@@ -153,156 +155,61 @@ def ingest_knowledge_base_dag():
         @task(
             map_index_template="{{ document_map_index }}"                
         )
-        def chunk_document(df):
+        # TODO: Abstract this to a separate module that can reused
+        def chunk_document_sections(df: pd.DataFrame, collection_name: str):
+
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
+            from langchain_core.documents import Document
 
             context = get_current_context()
             context["document_map_index"] = f"Chunks from document: {df['document_title'].iloc[0]}"
 
+            # TODO: Fine-tune the splitter params
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=2000,    # Default = 4000    - Testing with 2000
+                chunk_overlap=200,
+                length_function=len,
+                keep_separator=True
+            )
+
+            # Chunk only the content of each section
+            # TODO: Replace the apply with a more performant approach
+            df["chunks"] = df["section_content"].apply(
+                lambda x: splitter.split_documents([Document(page_content=x)])
+            )
+
+            df = df.explode("chunks", ignore_index=True)
+            df.dropna(subset=["chunks"], inplace=True)
+
+            df["chunk_content"] = df["chunks"].apply(lambda x: x.page_content)
+            df["chunk_id"] = df.apply(lambda row: generate_uuid5(identifier=[row['section_id'], row['chunks']], namespace=collection_name), axis=1)
+
+            # Drop both chunks (temporary column) and section_content (replicates full content on each chunk)
+            df.drop(["chunks"], inplace=True, axis=1)
+            df.drop(["section_content"], inplace=True, axis=1)
+            df.reset_index(inplace=True, drop=True)
+
+            t_log.info(f"Chunks DataFrame general structure: {df.info()}")
+            t_log.info(f"Chunks DataFrame main stats: {df.describe()}")
+            t_log.info(f"Chunks DataFrame first rows: {df.head()}")
+
             return df
 
-        chunk_document_ti = chunk_document(df=extract_sections_ti)
+        chunk_document_ti = chunk_document_sections(df=extract_sections_ti, collection_name=collection_name)
 
-        @task(
-            map_index_template="{{ document_map_index }}"                
+        ingest_chunks_into_weaviate_ti = WeaviateIngestOperator(
+            task_id="ingest_chunks",
+            conn_id=_WEAVIATE_CONN_ID,  # TODO: This should be passed by the task group
+            collection_name=collection_name,
+            map_index_template="Ingested chunks from document: {{ task.input_data.to_dict()['document_title'][0] }}.",
+            input_data=chunk_document_ti,
+            uuid_column="chunk_id", # This param avoids duplicates insertion
         )
-        def load_into_weaviate(df):
 
-            context = get_current_context()
-            context["document_map_index"] = f"Sections from document: {df['document_title'].iloc[0]}"
-
-        load_into_weaviate_ti = load_into_weaviate(df=chunk_document_ti)
-
-        extract_sections_ti >> chunk_document_ti >> load_into_weaviate_ti
+        extract_sections_ti >> chunk_document_ti >> ingest_chunks_into_weaviate_ti
 
     load_data_group_instance = load_data_group.partial(collection_name=KNOWLEDGE_BASE_COLLECTION).expand(group_file_path=fetch_documents_paths_ti)
 
     check_for_collection_ti >> [collections_exists_ti, create_collection_ti] >> weaviate_ready_instance >> fetch_documents_paths_ti >> load_data_group_instance
-
-    # @task(
-    #     map_index_template="{{ document_map_index }}"
-    # )
-    # def extract_document_text(ingestion_folder_local_path):
-    #     """
-    #     Extract information from markdown files in a folder.
-    #     Args:
-    #         folder_path (str): Path to the folder containing markdown files.
-    #     Returns:
-    #         pd.DataFrame: A list of dictionaries containing the extracted information.
-    #     """
-
-    #     # NOTE: We need the get_current_context method here to MODIFY the current context,
-    #     # passing he map index value at runtime
-    #     # When using def task_method(arg, **context), we can only access it, but we
-    #     # can't update the "root" dictionary object
-    #     context = get_current_context()
-    #     context["document_map_index"] = ingestion_folder_local_path
-
-    #     files = [
-    #         f for f in os.listdir(ingestion_folder_local_path) if f.endswith(".md")
-    #     ]
-
-    #     titles = []
-    #     texts = []
-
-    #     for file in files:
-    #         # file_path = os.path.join(ingestion_folder_local_path, file)
-    #         file_path = Path(ingestion_folder_local_path) / Path(file)
-            
-    #         titles.append(file_path.stem)
-    #         # titles.append(file.split(".")[0])
-
-    #         with open(file_path, "r", encoding="utf-8") as f:
-    #             texts.append(f.read())
-
-    #     document_df = pd.DataFrame(
-    #         {
-    #             "folder_path": ingestion_folder_local_path,
-    #             "title": titles,
-    #             "text": texts,
-    #         }
-    #     )
-    #     # NOTE: Inserting the caption metadata is not working
-    #     # document_df.style.set_caption(f"DataFrame for {ingestion_folder_local_path} folder files")
-
-    #     t_log.info(f"DataFrame general structure: {document_df.info()}")
-    #     t_log.info(f"DataFrame main stats: {document_df.describe()}")
-    #     t_log.info(f"DataFrame first rows: {document_df.head()}")
-
-    #     return document_df
-
-    # # NOTE: Expand expects kwargs, if we just pass the pargument value, it doesnt work
-    # extract_document_text_instance_list = extract_document_text.expand(
-    #     ingestion_folder_local_path=fetch_ingestion_folders_local_paths_instance
-    # )
-
-    # @task(
-    #     map_index_template="{{ my_custom_map_index }}"
-    # )
-    # def chunk_text(df):
-    #     """
-    #     Chunk the text in the DataFrame.
-    #     Args:
-    #         df (pd.DataFrame): The DataFrame containing the text to chunk.
-    #     Returns:
-    #         pd.DataFrame: The DataFrame with the text chunked.
-    #     """
-
-    #     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    #     from langchain_core.documents import Document
-
-    #     context = get_current_context()
-    #     # context["my_custom_map_index"] = df.style.caption
-    #     context["my_custom_map_index"] = f"Chunked files from a df of length: {len(df)}."
-
-    #     splitter = RecursiveCharacterTextSplitter()
-
-    #     df["chunks"] = df["text"].apply(
-    #         lambda x: splitter.split_documents([Document(page_content=x)])
-    #     )
-    #     # df.head()
-
-    #     df = df.explode("chunks", ignore_index=True)
-    #     df.dropna(subset=["chunks"], inplace=True)
-    #     # df.head()
-    #     # for chunk_object in df["chunks"]:
-    #     #     print(chunk_object)
-    #     #     print(chunk_object.__dict__)
-
-    #     df["text"] = df["chunks"].apply(lambda x: x.page_content)
-    #     df.drop(["chunks"], inplace=True, axis=1)
-    #     df.reset_index(inplace=True, drop=True)
-
-    #     t_log.info(f"Chunks DataFrame general structure: {df.info()}")
-    #     t_log.info(f"Chunks DataFrame main stats: {df.describe()}")
-    #     t_log.info(f"Chunks DataFrame first rows: {df.head()}")
-
-    #     return df
-
-    # chunk_text_instance_list = chunk_text.expand(df=extract_document_text_instance_list)
-
-    # ingest_data_instance_list = WeaviateIngestOperator.partial(
-    #     task_id="ingest_data",
-    #     conn_id="weaviate_default",
-    #     collection_name=_WEAVIATE_CLASS_NAME,
-    #     # NOTE: Use jinja templating to pass custom map index as well
-    #     map_index_template="Ingested files from: {{ task.input_data.to_dict()['folder_path'][0] }}.",
-    # ).expand(input_data=chunk_text_instance_list)
-
-
-    # check_collection_instance >> [
-    #     create_collection(
-    #         conn_id=_WEAVIATE_CONN_ID,
-    #         collection_name=_WEAVIATE_CLASS_NAME,
-    #         vectorizer=VECTORIZER,
-    #         schema_json_path=_WEAVIATE_SCHEMA_PATH,
-    #     ),
-    #     collection_exists_instance
-    # ] >> weaviate_ready_instance
-
-    # fetch_ingestion_folders_local_paths_instance >> extract_document_text_instance_list >> chunk_text_instance_list
-    # chain(
-    #     [chunk_text_instance_list, weaviate_ready_instance],
-    #     ingest_data_instance_list,
-    # )
 
 ingest_knowledge_base_dag()
