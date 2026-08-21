@@ -98,6 +98,10 @@ def ingest_knowledge_base_dag():
                     data_type=wvcc.DataType.TEXT,
                 ),
                 wvcc.Property(
+                    name="heading_level",
+                    data_type=wvcc.DataType.INT,
+                ),
+                wvcc.Property(
                     name="section_title_index",
                     data_type=wvcc.DataType.INT,
                 ),
@@ -159,10 +163,7 @@ def ingest_knowledge_base_dag():
             context = get_current_context()
             context["document_map_index"] = f"Document from: {document_path}"
 
-            sections_generator = extract_sections_from_markdown(
-                file_path=document_path,
-                collection_name=collection_name,
-            )
+            sections_generator = extract_sections_from_markdown(file_path=document_path)
 
             # TODO: Check if returning a dataframe is the best option here
             # TODO: Should we "fix" the types inside the df before returning it?

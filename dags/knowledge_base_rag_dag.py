@@ -18,7 +18,7 @@ t_log = logging.getLogger("airflow.task")
 
 # Weaviate constants
 _WEAVIATE_USER_CONN_ID = "weaviate_default"
-_WEAVIATE_RETURN_PROPERTIES = ["document_title", "section_title", "chunk_content", "section_title_index", "parent_section_index"]
+_WEAVIATE_RETURN_PROPERTIES = ["document_title", "section_title", "chunk_content", "section_title_index", "parent_section_index", "heading_level"]
 _CHUNKS_LIMIT = 3
 _HYBRID_SEARCH_ALPHA = 0.8
 
@@ -139,6 +139,7 @@ def knowledge_base_rag_dag():
                 "section_title": section_title,
                 "section_title_index": chunk.properties["section_title_index"],
                 "parent_section_index": chunk.properties["parent_section_index"],
+                "heading_level": chunk.properties["heading_level"],
             }
 
             t_log.info(f"Chunk found in document: {document_title}")
@@ -168,8 +169,7 @@ def knowledge_base_rag_dag():
 
     query_embeddings_ti = query_embeddings(weaviate_conn_id=_WEAVIATE_USER_CONN_ID)
 
-    # NOTE: Após o retrieval, precisamos desduplicar os chunks (utilizar o chunk_id)
-    # Também seria importante ORDERNAR os chunks para tentar "reconstruir" a seção
+    # NOTE: É importante ORDERNAR os chunks para tentar "reconstruir" a seção
     # Quando uma seção for quebrada em muitos chunks, precisamos reordenar esses chunks
     # para que a documentação faça sentido
     # NOTE: Se a ordenação for um problema (como adicionar um "índice" no splitter???)
@@ -213,6 +213,7 @@ def knowledge_base_rag_dag():
             if children_sections:
                 t_log.info(f"Chunks retrieved from children sections: {len(children_sections)}.")
 
+            # TODO: Implement the correct logic using the heading_level (now available)
             # NOTE: This is not correct, we have to store the heading level if we want to perform this comparison
             # if chunk["section_title_index"] >= 3:
             # if chunk["parent_section_index"]:
@@ -263,6 +264,7 @@ def knowledge_base_rag_dag():
                         "section_title": related_section.properties["section_title"],
                         "section_title_index": related_section.properties["section_title_index"],
                         "parent_section_index": related_section.properties["parent_section_index"],
+                        "heading_level": related_section.properties["heading_level"],
                     }
                     print(related_chunk)
                     related_chunks.append(related_chunk)

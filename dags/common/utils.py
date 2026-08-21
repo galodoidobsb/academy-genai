@@ -1,10 +1,11 @@
+import mistletoe
+
 from collections.abc import Iterator
 from typing import TypedDict, List
 from pathlib import Path
+from weaviate.util import generate_uuid5
 
-import mistletoe
 from mistletoe.block_token import Heading
-from mistletoe.markdown_renderer import MarkdownRenderer
 
 def extract_headers_mistletoe(file_path="include/data/guides/dynamic-tasks.md"):
     with open(file_path, "r", encoding="utf-8") as f:
@@ -23,10 +24,11 @@ class MarkdownSection(TypedDict):
     """Represent one heading-based section extracted from a Markdown document.
 
     Attributes:
-        section_id: UUID5 composed by `document_title`, `section_title`,
+        section_id: UUID4 composed by `document_title`, `section_title`,
             `section_title_index`, and `parent_section_index`.
         document_title: Filename (without extension) of the source document.
         document_path: Source document original file path.
+        heading_level: Heading hierarchy level of the section.
         section_title_index: Position of the heading in the document's top-level tokens.
         parent_section_index: Position of the nearest parent heading, or ``None`` when
             the heading has no parent.
@@ -38,6 +40,7 @@ class MarkdownSection(TypedDict):
     section_id: str
     document_title: str
     document_path: str
+    heading_level: int
     section_title_index: int
     parent_section_index: int | None
     section_title: str
@@ -58,7 +61,6 @@ class MarkdownSection(TypedDict):
 def extract_sections_from_markdown(
     file_path: str = "include/data/guides/dynamic-tasks.md",
     encoding: str = "utf-8",
-    collection_name: str = None,
 ) -> Iterator[MarkdownSection]:
     """Parse a Markdown document into non-overlapping heading sections.
 
@@ -79,7 +81,6 @@ def extract_sections_from_markdown(
     import mistletoe
     from mistletoe.block_token import Heading
     from mistletoe.markdown_renderer import MarkdownRenderer
-    from weaviate.util import generate_uuid5
 
     # The renderer converts the parsed block tokens back into Markdown text.
     with MarkdownRenderer() as renderer:
@@ -95,6 +96,7 @@ def extract_sections_from_markdown(
 
             # A heading contains inline child tokens that make up its title.
             heading = token
+            heading_level = heading.level
             title = "".join(
                 child.content
                 for child in heading.children
@@ -135,22 +137,18 @@ def extract_sections_from_markdown(
 
             document_title = Path(file_path).stem
 
-            # TODO: Remove collection_name from namespace
-            # Use native uuid5 lib instead
-            # The collection_name will be added downstream when chunking the section
-            # Yielding here makes sections available to the caller one at a time.
             md_dict: MarkdownSection = {
                 "section_id": generate_uuid5(
                     identifier=[
                         document_title,
                         title,
                         index,
-                        parent_index,
+                        parent_index
                     ],
-                    namespace=collection_name,
                 ),
                 "document_title": document_title,
                 "document_path": file_path,
+                "heading_level": heading_level,
                 "section_title_index": index,
                 "parent_section_index": parent_index,
                 "section_title": title,
