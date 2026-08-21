@@ -8,7 +8,6 @@ from airflow.sdk import dag, task, Param
 from airflow.exceptions import AirflowFailException
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 from pendulum import datetime, duration
-from typing import List
 from common.constants import KNOWLEDGE_BASE_COLLECTION
 import weaviate.classes as wvc
 import logging
@@ -86,7 +85,7 @@ def knowledge_base_rag_dag():
     check_collection_ti = check_collection(conn_id=_WEAVIATE_USER_CONN_ID)  
 
     @task
-    def query_embeddings(weaviate_conn_id: str, search_method: str="hybrid", **context) -> List:
+    def query_embeddings(weaviate_conn_id: str, search_method: str="hybrid", **context) -> list:
         "Query the Weaviate instance for documentation chunks related to the user input."
 
         # Get user input passed to the DAG
@@ -177,8 +176,101 @@ def knowledge_base_rag_dag():
     # a solução mais fácil para o MVP seria então simplesmente PULAR o splitter e ingerir
     # cada seção "por inteiro"
     @task
-    def retrieve_related_objects(weaviate_conn_id: str, chunks):
-        pass
+    def retrieve_related_objects(weaviate_conn_id: str, chunks: list, **context):
+
+        from weaviate.classes.query import Filter
+
+        # Get collection name passed to the DAG
+        collection_name = context["params"]["collection_name"]
+
+        # Create the hook to interact with Weaviate server
+        hook = WeaviateHook(weaviate_conn_id)
+
+        # Retrieve the collection stored in in Weaviate
+        knowledge_base_collection = hook.get_collection(collection_name)
+
+        retrieved_chunks_ids = [chunk["chunk_id"] for chunk in chunks]
+
+        related_chunks = []
+
+        for chunk in chunks:
+
+            children_sections = knowledge_base_collection.query.fetch_objects(
+                filters=(
+                    Filter.all_of([
+                        Filter.by_property("document_title").equal(chunk["document_title"]),
+                        Filter.by_property("parent_section_index").equal(chunk["section_title_index"]),
+                        Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),     # This avoid duplicates
+                        # Filter.by_property("parent_section_index").greater_than(1),
+                    ])
+                ),
+                limit=10,
+                return_properties=_WEAVIATE_RETURN_PROPERTIES,
+            ).objects
+
+            print("Children sections: ", children_sections)
+
+            if children_sections:
+                t_log.info(f"Chunks retrieved from children sections: {len(children_sections)}.")
+
+            # NOTE: This is not correct, we have to store the heading level if we want to perform this comparison
+            # if chunk["section_title_index"] >= 3:
+            # if chunk["parent_section_index"]:
+            # if chunk["parent_section_index"] is not None:
+            #     siblings_sections = knowledge_base_collection.query.fetch_objects(
+            #         filters=(
+            #             Filter.all_of([
+            #                 Filter.by_property("document_title").equal(chunk["document_title"]),
+            #                 Filter.by_property("parent_section_index").equal(chunk["parent_section_index"]),
+            #                 # Filter.by_property("parent_section_index").greater_than(1),   # NOTE: This is probably causing an error because the column was ingested as a string, not as int or float
+            #                 Filter.not_(Filter.by_property("parent_section_index").equal(1)),
+            #                 Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),   # This avoid duplicates
+            #             ])
+            #         ),
+            #         limit=10,
+            #         return_properties=_WEAVIATE_RETURN_PROPERTIES,
+            #     ).objects
+            # else:
+            #     siblings_sections = []
+
+            # Those are actually chunks from the same section (required when the section is large)
+            siblings_sections = knowledge_base_collection.query.fetch_objects(
+                filters=(
+                    Filter.all_of([
+                        Filter.by_property("document_title").equal(chunk["document_title"]),
+                        Filter.by_property("section_title_index").equal(chunk["section_title_index"]),
+                        Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),     # This avoid duplicates
+                    ])
+                ),
+                limit=10,
+                return_properties=_WEAVIATE_RETURN_PROPERTIES,
+            ).objects
+
+            if siblings_sections:
+                t_log.info(f"Chunks retrieved from siblings sections: {len(siblings_sections)}.")
+
+            print("Siblings sections: ", siblings_sections)
+
+            related_sections = children_sections + siblings_sections
+
+            for related_section in related_sections:
+                # Avoid duplicates insertion between siblings and parents
+                if str(related_section.uuid) not in retrieved_chunks_ids:
+                    related_chunk = {
+                        "chunk_id": str(related_section.uuid),
+                        "chunk_content": related_section.properties["chunk_content"],
+                        "document_title": related_section.properties["document_title"],
+                        "section_title": related_section.properties["section_title"],
+                        "section_title_index": related_section.properties["section_title_index"],
+                        "parent_section_index": related_section.properties["parent_section_index"],
+                    }
+                    print(related_chunk)
+                    related_chunks.append(related_chunk)
+                    retrieved_chunks_ids.append(related_chunk["chunk_id"])
+
+        t_log.info(f"Unique related chunks retrieved: {len(related_chunks)}.")
+
+        print(related_chunks)
 
     retrieve_related_objects_ti = retrieve_related_objects(weaviate_conn_id=_WEAVIATE_USER_CONN_ID, chunks=query_embeddings_ti)
 
