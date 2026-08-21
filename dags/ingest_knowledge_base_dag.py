@@ -81,7 +81,44 @@ def ingest_knowledge_base_dag():
         hook = WeaviateHook(conn_id=connection_id)
 
         # Create the collection using the hook
-        hook.create_collection(name=collection_name, vectorizer_config=vectorizer_config)
+        hook.create_collection(
+            name=collection_name,
+            vectorizer_config=vectorizer_config,
+            properties=[
+                wvcc.Property(
+                    name="section_id",
+                    data_type=wvcc.DataType.UUID,
+                ),
+                wvcc.Property(
+                    name="document_title",
+                    data_type=wvcc.DataType.TEXT,
+                ),
+                wvcc.Property(
+                    name="document_path",
+                    data_type=wvcc.DataType.TEXT,
+                ),
+                wvcc.Property(
+                    name="section_title_index",
+                    data_type=wvcc.DataType.INT,
+                ),
+                wvcc.Property(
+                    name="parent_section_index",
+                    data_type=wvcc.DataType.INT,
+                ),
+                wvcc.Property(
+                    name="section_title",
+                    data_type=wvcc.DataType.TEXT,
+                ),
+                wvcc.Property(
+                    name="section_reference",
+                    data_type=wvcc.DataType.TEXT,
+                ),
+                wvcc.Property(
+                    name="chunk_content",
+                    data_type=wvcc.DataType.TEXT,
+                ),
+            ],
+        )
 
     create_collection_ti = create_collection(connection_id=_WEAVIATE_CONN_ID, collection_name=KNOWLEDGE_BASE_COLLECTION, vectorizer_config=_VECTORIZER)
 
