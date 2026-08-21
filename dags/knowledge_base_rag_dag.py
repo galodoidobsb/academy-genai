@@ -299,6 +299,8 @@ def knowledge_base_rag_dag():
 
     retrieve_related_objects_ti = retrieve_related_objects(weaviate_conn_id=_WEAVIATE_USER_CONN_ID, chunks=query_embeddings_ti)
 
+    # TODO: Include an index during the document chunking,
+    # so we can use it to sort chunks inside the same section
     @task
     def combine_chunks(rag_chunks: list[dict], related_chunks: list[dict]):
         "Combine and sort queried and related chunks."
