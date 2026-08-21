@@ -20,7 +20,11 @@ t_log = logging.getLogger("airflow.task")
 _WEAVIATE_USER_CONN_ID = "weaviate_default"
 _WEAVIATE_RETURN_PROPERTIES = ["document_title", "section_title", "chunk_content", "section_title_index", "parent_section_index", "heading_level"]
 _CHUNKS_LIMIT = 3
+_RELATED_CHUNKS_LIMIT = 5
 _HYBRID_SEARCH_ALPHA = 0.8
+
+_SCORE_THRESHOLD = 0.85
+_CERTAINTY_THRESHOLD = 0.8
 
 _WEAVIATE_RETURN_METADATA = ""
 
@@ -85,8 +89,14 @@ def knowledge_base_rag_dag():
     check_collection_ti = check_collection(conn_id=_WEAVIATE_USER_CONN_ID)  
 
     @task
-    def query_embeddings(weaviate_conn_id: str, search_method: str="hybrid", **context) -> list:
-        "Query the Weaviate instance for documentation chunks related to the user input."
+    def query_embeddings(
+        weaviate_conn_id: str,
+        certainty_threshold: float = _CERTAINTY_THRESHOLD,
+        score_threshold: float = _SCORE_THRESHOLD,
+        search_method: str="hybrid",
+        **context
+    ) -> list[dict]:
+        "Query the Weaviate instance for documentation chunks related to the user input."        
 
         # Get user input passed to the DAG
         collection_name = context["params"]["collection_name"]
@@ -98,7 +108,9 @@ def knowledge_base_rag_dag():
         # Retrieve the collection stored in in Weaviate
         knowledge_base_collection = hook.get_collection(collection_name)
 
+        # Define adequate query and threshold
         if search_method == "hybrid":
+            threshold = score_threshold
             document_chunks = knowledge_base_collection.query.hybrid(
                 query=user_input,
                 limit=_CHUNKS_LIMIT,    # This is an interesting param to experiment with
@@ -107,6 +119,7 @@ def knowledge_base_rag_dag():
                 return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, score=True, explain_score=True, creation_time=True)
             )
         elif search_method == "near_text":
+            threshold = certainty_threshold
             document_chunks = knowledge_base_collection.query.near_text(
                 query=user_input,
                 limit=_CHUNKS_LIMIT,    # This is an interesting param to experiment with
@@ -121,6 +134,20 @@ def knowledge_base_rag_dag():
         chunks = []
 
         for chunk in document_chunks.objects:
+
+            quality = chunk.metadata.score or chunk.metadata.certainty
+
+            if quality < threshold:
+                # Fazer o log do objeto descartado
+                t_log.info(f"Chunk score/certainty {(100*quality):.2f}% below the defined {(100*threshold):.2f}% threshold, so it will be discarded.")
+                t_log.info(
+                    f"""Discarded chunk:
+                    Document: {chunk.properties["document_title"]}
+                    Section: {chunk.properties["section_title"]}
+                    Content: {chunk.properties["chunk_content"]}
+                """)
+                continue
+ 
             chunk_id = str(chunk.uuid)
             document_title = chunk.properties["document_title"]
             section_title = chunk.properties["section_title"]
@@ -204,7 +231,7 @@ def knowledge_base_rag_dag():
                         # Filter.by_property("parent_section_index").greater_than(1),
                     ])
                 ),
-                limit=10,
+                limit=_RELATED_CHUNKS_LIMIT,
                 return_properties=_WEAVIATE_RETURN_PROPERTIES,
             ).objects
 
@@ -243,7 +270,7 @@ def knowledge_base_rag_dag():
                         Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),     # This avoid duplicates
                     ])
                 ),
-                limit=10,
+                limit=_RELATED_CHUNKS_LIMIT,
                 return_properties=_WEAVIATE_RETURN_PROPERTIES,
             ).objects
 
