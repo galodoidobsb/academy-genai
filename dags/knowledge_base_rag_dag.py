@@ -8,6 +8,7 @@ from airflow.sdk import dag, task, Param
 from airflow.exceptions import AirflowFailException
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook
 from pendulum import datetime, duration
+from typing import List
 from common.constants import KNOWLEDGE_BASE_COLLECTION
 import weaviate.classes as wvc
 import logging
@@ -18,7 +19,10 @@ t_log = logging.getLogger("airflow.task")
 
 # Weaviate constants
 _WEAVIATE_USER_CONN_ID = "weaviate_default"
-_WEAVIATE_RETURN_PROPERTIES = ""
+_WEAVIATE_RETURN_PROPERTIES = ["document_title", "section_title", "chunk_content", "section_title_index", "parent_section_index"]
+_CHUNKS_LIMIT = 3
+_HYBRID_SEARCH_ALPHA = 0.8
+
 _WEAVIATE_RETURN_METADATA = ""
 
 
@@ -81,9 +85,8 @@ def knowledge_base_rag_dag():
 
     check_collection_ti = check_collection(conn_id=_WEAVIATE_USER_CONN_ID)  
 
-    # TODO: Refactor task to enable using near_text or hybrid search
     @task
-    def query_embeddings(weaviate_conn_id: str, search_method: str="near_text", **context) -> None:
+    def query_embeddings(weaviate_conn_id: str, search_method: str="hybrid", **context) -> List:
         "Query the Weaviate instance for documentation chunks related to the user input."
 
         # Get user input passed to the DAG
@@ -96,23 +99,23 @@ def knowledge_base_rag_dag():
         # Retrieve the collection stored in in Weaviate
         knowledge_base_collection = hook.get_collection(collection_name)
 
-        # TODO: Experiment with hybrid search as well
-        # Use the near_text search to retrieve the most relevant chunks
-        # document_chunks = knowledge_base_collection.query.near_text(
-        #     query=user_input,
-        #     limit=3,    # This is an interesting param to experiment with
-        #     return_properties=["document_title", "section_title", "chunk_content"],
-        #     # Request confidence metrics in metadata
-        #     return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, creation_time=True)             
-        # )
-        document_chunks = knowledge_base_collection.query.hybrid(
-            query=user_input,
-            limit=3,    # This is an interesting param to experiment with
-            alpha=0.8,
-            return_properties=["document_title", "section_title", "chunk_content", "section_title_index", "parent_section_index"],
-            # Request confidence metrics in metadata
-            return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, score=True, explain_score=True, creation_time=True)             
-        )
+        if search_method == "hybrid":
+            document_chunks = knowledge_base_collection.query.hybrid(
+                query=user_input,
+                limit=_CHUNKS_LIMIT,    # This is an interesting param to experiment with
+                alpha=_HYBRID_SEARCH_ALPHA,
+                return_properties=_WEAVIATE_RETURN_PROPERTIES,
+                return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, score=True, explain_score=True, creation_time=True)
+            )
+        elif search_method == "near_text":
+            document_chunks = knowledge_base_collection.query.near_text(
+                query=user_input,
+                limit=_CHUNKS_LIMIT,    # This is an interesting param to experiment with
+                return_properties=_WEAVIATE_RETURN_PROPERTIES,
+                return_metadata=wvc.query.MetadataQuery(certainty=True, distance=True, creation_time=True)
+            )
+        else:
+            raise AirflowFailException(f"Search method {search_method} is not supported. Please, chose either 'hybrid' or 'near_text'.")
 
         t_log.info(f"Chunks retrieved: {len(document_chunks.objects)}.")
 
@@ -124,38 +127,44 @@ def knowledge_base_rag_dag():
             section_title = chunk.properties["section_title"]
             chunk_content = chunk.properties["chunk_content"]
             # Properties of the near_text search
-            # search_distance = chunk.metadata.distance
-            # search_certainty = chunk.metadata.certainty
+            search_distance = chunk.metadata.distance
+            search_certainty = chunk.metadata.certainty
             # Property of the hybrid search
             search_score = chunk.metadata.score
             explain_score = chunk.metadata.explain_score
 
-            chunks.append(
-                {
-                    "chunk_id": chunk_id,
-                    "chunk_content": chunk_content,
-                    "document_title": document_title,
-                    "section_title": section_title,
-                    "section_title_index": chunk.properties["section_title_index"],
-                    "parent_section_index": chunk.properties["parent_section_index"],
-                    "search_score": search_score,
-                    "explain_score": explain_score,
-                }
-            )
+            chunk_properties = {
+                "chunk_id": chunk_id,
+                "chunk_content": chunk_content,
+                "document_title": document_title,
+                "section_title": section_title,
+                "section_title_index": chunk.properties["section_title_index"],
+                "parent_section_index": chunk.properties["parent_section_index"],
+            }
 
             t_log.info(f"Chunk found in document: {document_title}")
             t_log.info(f"Chunk extracted from section: {section_title}")
-            # t_log.info(f"Chunk content: {chunk_content}")
-            t_log.info(f"Chunk search score is {(100*search_score):.2f}%.")
-            # t_log.info(f"Chunk search certainty is {(100*search_certainty):.2f}%.")
-            # t_log.info(f"Chunk search distance is {search_distance:.4f}.")
+            if search_method == "hybrid":
+                chunk_properties.update(
+                    {
+                        "search_score": search_score,
+                        "explain_score": explain_score,
+                    }
+                )
+                t_log.info(f"Chunk search score is {(100*search_score):.2f}%.")
+                t_log.info(f"Chunk score explanation: {explain_score}.")
+            elif search_method == "near_text":
+                chunk_properties.update(
+                    {
+                        "search_certainty": search_certainty,
+                        "search_distance": search_distance,
+                    }
+                )
+                t_log.info(f"Chunk search certainty is {(100*search_certainty):.2f}%.")
+                t_log.info(f"Chunk search distance is {(search_distance):.4f}.")
 
-        # Weaviate Objects are not serializable by default.
-        # We need to transform them to dicts or a Dataframe
-        # Pydantic is not required here because the output is deterministic, so we
-        # can simply map Weaviate object to dicts/dataframe
+            chunks.append(chunk_properties)
 
-        # chunks_df = pd.DataFrame(document_chunks.objects)
         return chunks
 
     query_embeddings_ti = query_embeddings(weaviate_conn_id=_WEAVIATE_USER_CONN_ID)
