@@ -202,8 +202,10 @@ def knowledge_base_rag_dag():
     # NOTE: Se a ordenação for um problema (como adicionar um "índice" no splitter???)
     # a solução mais fácil para o MVP seria então simplesmente PULAR o splitter e ingerir
     # cada seção "por inteiro"
+    # TODO: Abstract this to a separate module and break into atomic methods
+    # Evaluate if we should create a class to hold all Weaviate-related methods
     @task
-    def retrieve_related_objects(weaviate_conn_id: str, chunks: list, **context):
+    def retrieve_related_objects(weaviate_conn_id: str, chunks: list, **context) -> list[dict]:
 
         from weaviate.classes.query import Filter
 
@@ -220,15 +222,29 @@ def knowledge_base_rag_dag():
 
         related_chunks = []
 
+        # NOTE: This would be a nice async implementation, so all queries could run in parallel
         for chunk in chunks:
+
+            same_section = knowledge_base_collection.query.fetch_objects(
+                filters=(
+                    Filter.all_of([
+                        Filter.by_property("document_title").equal(chunk["document_title"]),
+                        Filter.by_property("section_title_index").equal(chunk["section_title_index"]),
+                        Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),     # This avoids duplicates
+                    ])
+                ),
+                limit=_RELATED_CHUNKS_LIMIT,
+                return_properties=_WEAVIATE_RETURN_PROPERTIES,
+            ).objects
+
+            print("Same section chunks: ", same_section)
 
             children_sections = knowledge_base_collection.query.fetch_objects(
                 filters=(
                     Filter.all_of([
                         Filter.by_property("document_title").equal(chunk["document_title"]),
                         Filter.by_property("parent_section_index").equal(chunk["section_title_index"]),
-                        Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),     # This avoid duplicates
-                        # Filter.by_property("parent_section_index").greater_than(1),
+                        Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),     # This avoids duplicates
                     ])
                 ),
                 limit=_RELATED_CHUNKS_LIMIT,
@@ -240,49 +256,31 @@ def knowledge_base_rag_dag():
             if children_sections:
                 t_log.info(f"Chunks retrieved from children sections: {len(children_sections)}.")
 
-            # TODO: Implement the correct logic using the heading_level (now available)
-            # NOTE: This is not correct, we have to store the heading level if we want to perform this comparison
-            # if chunk["section_title_index"] >= 3:
-            # if chunk["parent_section_index"]:
-            # if chunk["parent_section_index"] is not None:
-            #     siblings_sections = knowledge_base_collection.query.fetch_objects(
-            #         filters=(
-            #             Filter.all_of([
-            #                 Filter.by_property("document_title").equal(chunk["document_title"]),
-            #                 Filter.by_property("parent_section_index").equal(chunk["parent_section_index"]),
-            #                 # Filter.by_property("parent_section_index").greater_than(1),   # NOTE: This is probably causing an error because the column was ingested as a string, not as int or float
-            #                 Filter.not_(Filter.by_property("parent_section_index").equal(1)),
-            #                 Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),   # This avoid duplicates
-            #             ])
-            #         ),
-            #         limit=10,
-            #         return_properties=_WEAVIATE_RETURN_PROPERTIES,
-            #     ).objects
-            # else:
-            #     siblings_sections = []
-
-            # Those are actually chunks from the same section (required when the section is large)
-            siblings_sections = knowledge_base_collection.query.fetch_objects(
-                filters=(
-                    Filter.all_of([
-                        Filter.by_property("document_title").equal(chunk["document_title"]),
-                        Filter.by_property("section_title_index").equal(chunk["section_title_index"]),
-                        Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),     # This avoid duplicates
-                    ])
-                ),
-                limit=_RELATED_CHUNKS_LIMIT,
-                return_properties=_WEAVIATE_RETURN_PROPERTIES,
-            ).objects
+            if chunk["heading_level"] >= 3:
+                siblings_sections = knowledge_base_collection.query.fetch_objects(
+                    filters=(
+                        Filter.all_of([
+                            Filter.by_property("document_title").equal(chunk["document_title"]),
+                            Filter.by_property("parent_section_index").equal(chunk["parent_section_index"]),
+                            Filter.by_property("heading_level").equal(chunk["heading_level"]),
+                            Filter.not_(Filter.by_id().contains_any(retrieved_chunks_ids)),     # This avoids duplicates
+                        ])
+                    ),
+                    limit=_RELATED_CHUNKS_LIMIT,
+                    return_properties=_WEAVIATE_RETURN_PROPERTIES,
+                ).objects
+            else:
+                siblings_sections = []
 
             if siblings_sections:
                 t_log.info(f"Chunks retrieved from siblings sections: {len(siblings_sections)}.")
 
             print("Siblings sections: ", siblings_sections)
 
-            related_sections = children_sections + siblings_sections
+            related_sections = same_section + children_sections + siblings_sections
 
             for related_section in related_sections:
-                # Avoid duplicates insertion between siblings and parents
+                # Avoids duplicates insertion between siblings and parents
                 if str(related_section.uuid) not in retrieved_chunks_ids:
                     related_chunk = {
                         "chunk_id": str(related_section.uuid),
@@ -299,13 +297,22 @@ def knowledge_base_rag_dag():
 
         t_log.info(f"Unique related chunks retrieved: {len(related_chunks)}.")
 
-        print(related_chunks)
+        return related_chunks
 
     retrieve_related_objects_ti = retrieve_related_objects(weaviate_conn_id=_WEAVIATE_USER_CONN_ID, chunks=query_embeddings_ti)
 
-    # TODO: Next step is to implement the related-objects retrieval
-    # Only retrieve chunks of a defined score threshold (experiment with 0.7 or 0.8)
+    @task
+    def combine_chunks(rag_chunks: list[dict], related_chunks: list[dict]):
 
-    check_collection_ti >> query_embeddings_ti >> retrieve_related_objects_ti
+        combined_chunks = rag_chunks + related_chunks
+        sorted_chunks = sorted(combined_chunks, key=lambda x: (x['document_title'], x['section_title_index']))
+
+        t_log.info(f"Total chunks combined for consumption: {len(sorted_chunks)}.")
+
+        return sorted_chunks
+
+    combine_chunks_ti = combine_chunks(rag_chunks=query_embeddings_ti, related_chunks=retrieve_related_objects_ti)
+
+    check_collection_ti >> query_embeddings_ti >> retrieve_related_objects_ti >> combine_chunks_ti
 
 knowledge_base_rag_dag()
