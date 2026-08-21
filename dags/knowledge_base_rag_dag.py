@@ -11,7 +11,6 @@ from pendulum import datetime, duration
 from common.constants import KNOWLEDGE_BASE_COLLECTION
 import weaviate.classes as wvc
 import logging
-import pandas as pd
 
 # Start logger
 t_log = logging.getLogger("airflow.task")
@@ -25,8 +24,6 @@ _HYBRID_SEARCH_ALPHA = 0.8
 
 _SCORE_THRESHOLD = 0.85
 _CERTAINTY_THRESHOLD = 0.8
-
-_WEAVIATE_RETURN_METADATA = ""
 
 
 @dag(
@@ -96,7 +93,7 @@ def knowledge_base_rag_dag():
         search_method: str="hybrid",
         **context
     ) -> list[dict]:
-        "Query the Weaviate instance for documentation chunks related to the user input."        
+        "Query Weaviate for documentation chunks related to the user input."        
 
         # Get user input passed to the DAG
         collection_name = context["params"]["collection_name"]
@@ -206,6 +203,7 @@ def knowledge_base_rag_dag():
     # Evaluate if we should create a class to hold all Weaviate-related methods
     @task
     def retrieve_related_objects(weaviate_conn_id: str, chunks: list, **context) -> list[dict]:
+        "Retrieve chunks related to the queried ones from Weaviate."
 
         from weaviate.classes.query import Filter
 
@@ -303,6 +301,7 @@ def knowledge_base_rag_dag():
 
     @task
     def combine_chunks(rag_chunks: list[dict], related_chunks: list[dict]):
+        "Combine and sort queried and related chunks."
 
         combined_chunks = rag_chunks + related_chunks
         sorted_chunks = sorted(combined_chunks, key=lambda x: (x['document_title'], x['section_title_index']))
